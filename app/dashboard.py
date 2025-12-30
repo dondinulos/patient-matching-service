@@ -16,6 +16,13 @@ import sys
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Graph visualization
+try:
+    from streamlit_agraph import agraph, Node, Edge, Config
+    AGRAPH_AVAILABLE = True
+except ImportError:
+    AGRAPH_AVAILABLE = False
+
 from azure.identity import DefaultAzureCredential, AzureCliCredential
 from azure.cosmos import CosmosClient
 from gremlin_python.driver import client, serializer
@@ -56,6 +63,32 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+
+def get_gremlin_property(vertex: dict, prop_name: str, default: str = "") -> str:
+    """
+    Extract a property value from a Cosmos DB Gremlin vertex.
+    
+    Gremlin stores properties as arrays of objects: [{"id": "...", "value": "actual_value"}]
+    This function handles both Gremlin format and simple key-value format.
+    """
+    if prop_name not in vertex:
+        return default
+    
+    prop = vertex[prop_name]
+    
+    # If it's a list (Gremlin format), extract the first value
+    if isinstance(prop, list) and len(prop) > 0:
+        first_item = prop[0]
+        if isinstance(first_item, dict) and "value" in first_item:
+            return str(first_item["value"])
+        return str(first_item)
+    
+    # If it's already a simple value, return it
+    if prop is None:
+        return default
+    
+    return str(prop)
 
 
 @st.cache_resource
@@ -117,6 +150,103 @@ def fetch_patients(_nosql_client, account_name):
         return []
 
 
+@st.cache_data(ttl=60)
+def fetch_patient_clinical_data(_nosql_client, account_name, patient_id):
+    """Fetch all clinical data related to a patient from Cosmos DB Graph (via SQL API on graph container)."""
+    try:
+        database = _nosql_client.get_database_client("patient-matching-db")
+        container = database.get_container_client("patients")
+        
+        # In Cosmos DB Gremlin, vertices are stored as documents with a 'label' property
+        # Edges are stored separately with _isEdge=true and connect vertices via _sink/_vertexId
+        
+        # Fetch patient vertex
+        patient_query = f"SELECT * FROM c WHERE c.id = '{patient_id}' AND c.label = 'Patient'"
+        patients = list(container.query_items(query=patient_query, enable_cross_partition_query=True))
+        patient = patients[0] if patients else None
+        
+        clinical_data = {
+            "patient": patient,
+            "encounters": [],
+            "observations": [],
+            "conditions": [],
+            "procedures": [],
+            "immunizations": [],
+            "medications": [],
+            "identifiers": [],
+            "potential_matches": []
+        }
+        
+        if not patient:
+            return clinical_data
+        
+        # Get the patient's source_system (partition key) for efficient queries
+        source_system = patient.get("source_system", "synthea")
+        
+        # Query edges from patient to find connected clinical vertices
+        # In Cosmos DB Gremlin, edges have _isEdge=true, _sink (target vertex id), and _vertexId (source vertex id)
+        
+        # Find all edges originating from this patient
+        edges_query = f"""
+            SELECT c._sink, c.label as edge_label 
+            FROM c 
+            WHERE c._isEdge = true AND c._vertexId = '{patient_id}'
+        """
+        edges = list(container.query_items(query=edges_query, enable_cross_partition_query=True))
+        
+        # Group edge targets by type
+        encounter_ids = []
+        observation_ids = []
+        condition_ids = []
+        procedure_ids = []
+        immunization_ids = []
+        medication_ids = []
+        identifier_ids = []
+        
+        for edge in edges:
+            edge_label = edge.get("edge_label", "")
+            sink_id = edge.get("_sink", "")
+            if sink_id:
+                if edge_label == "HAS_ENCOUNTER":
+                    encounter_ids.append(sink_id)
+                elif edge_label == "HAS_OBSERVATION":
+                    observation_ids.append(sink_id)
+                elif edge_label == "HAS_CONDITION":
+                    condition_ids.append(sink_id)
+                elif edge_label == "HAS_PROCEDURE":
+                    procedure_ids.append(sink_id)
+                elif edge_label == "HAS_IMMUNIZATION":
+                    immunization_ids.append(sink_id)
+                elif edge_label == "HAS_MEDICATION":
+                    medication_ids.append(sink_id)
+                elif edge_label == "HAS_IDENTIFIER":
+                    identifier_ids.append(sink_id)
+        
+        # Fetch vertices by their IDs (batch queries for efficiency)
+        def fetch_vertices_by_ids(vertex_ids, label):
+            if not vertex_ids:
+                return []
+            # Limit to first 50 for performance
+            vertex_ids = vertex_ids[:50]
+            ids_str = ", ".join([f"'{vid}'" for vid in vertex_ids])
+            query = f"SELECT * FROM c WHERE c.id IN ({ids_str}) AND c.label = '{label}'"
+            return list(container.query_items(query=query, enable_cross_partition_query=True))
+        
+        clinical_data["encounters"] = fetch_vertices_by_ids(encounter_ids, "Encounter")
+        clinical_data["observations"] = fetch_vertices_by_ids(observation_ids, "Observation")
+        clinical_data["conditions"] = fetch_vertices_by_ids(condition_ids, "Condition")
+        clinical_data["procedures"] = fetch_vertices_by_ids(procedure_ids, "Procedure")
+        clinical_data["immunizations"] = fetch_vertices_by_ids(immunization_ids, "Immunization")
+        clinical_data["medications"] = fetch_vertices_by_ids(medication_ids, "MedicationRequest")
+        clinical_data["identifiers"] = fetch_vertices_by_ids(identifier_ids, "Identifier")
+        
+        return clinical_data
+    except Exception as e:
+        st.error(f"Error fetching patient clinical data: {e}")
+        return {"patient": None, "encounters": [], "observations": [], "conditions": [], 
+                "procedures": [], "immunizations": [], "medications": [], "identifiers": [], "potential_matches": []}
+
+
 def get_confidence_color(confidence):
     """Return color based on confidence level."""
     if confidence == "auto_merge":
@@ -162,7 +292,7 @@ def main():
         # Navigation
         page = st.radio(
             "Navigation",
-            ["📊 Dashboard", "🔍 Match Results", "👥 Patients", "📋 Review Queue", "⚙️ Settings"]
+            ["📊 Dashboard", "🔍 Match Results", "👥 Patients", "🕸️ Patient Graph", "📋 Review Queue", "⚙️ Settings"]
         )
         
         st.markdown("---")
@@ -186,6 +316,8 @@ def main():
         render_match_results(nosql_client, account_name)
     elif page == "👥 Patients":
         render_patients(nosql_client, account_name)
+    elif page == "🕸️ Patient Graph":
+        render_patient_graph(nosql_client, gremlin_client, account_name)
     elif page == "📋 Review Queue":
         render_review_queue(nosql_client, account_name)
     elif page == "⚙️ Settings":
@@ -1051,6 +1183,335 @@ def render_settings():
     if st.button("💾 Save Settings"):
         st.success("Settings saved! (Demo - not actually persisted)")
         st.info("To persist settings, update environment variables or configuration files.")
+
+
+def render_patient_graph(nosql_client, gremlin_client, account_name):
+    """Render an interactive graph visualization of patient and clinical data relationships."""
+    st.title("🕸️ Patient Clinical Data Graph")
+    st.markdown("Visualize the relationships between a patient and their clinical data")
+    
+    if not AGRAPH_AVAILABLE:
+        st.error("Graph visualization requires the `streamlit-agraph` package. Install it with:")
+        st.code("pip install streamlit-agraph")
+        st.info("After installing, restart the Streamlit server.")
+        return
+    
+    if not nosql_client:
+        st.warning("Please configure Cosmos DB connection to view data.")
+        return
+    
+    # Fetch patients for selection
+    patients = fetch_patients(nosql_client, account_name)
+    
+    if not patients:
+        st.info("No patients found in the database.")
+        return
+    
+    # Patient selector - use helper to extract Gremlin properties
+    patient_options = {}
+    for p in patients[:100]:  # Limit to first 100 for performance
+        first_name = get_gremlin_property(p, 'firstName', '')
+        last_name = get_gremlin_property(p, 'lastName', '')
+        birth_date = get_gremlin_property(p, 'birthDate', 'N/A')
+        patient_id = p.get('id', '')
+        label = f"{first_name} {last_name} (DOB: {birth_date}) - {patient_id[:12]}..."
+        patient_options[label] = patient_id
+    
+    selected_patient_label = st.selectbox(
+        "🔎 Select a patient to view their clinical data graph",
+        options=list(patient_options.keys()),
+        index=0
+    )
+    
+    selected_patient_id = patient_options.get(selected_patient_label)
+    
+    if not selected_patient_id:
+        return
+    
+    # Graph configuration options
+    st.markdown("---")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        show_encounters = st.checkbox("🏥 Encounters", value=True)
+        show_observations = st.checkbox("🔬 Observations", value=True)
+    with col2:
+        show_conditions = st.checkbox("💊 Conditions", value=True)
+        show_procedures = st.checkbox("🔧 Procedures", value=True)
+    with col3:
+        show_immunizations = st.checkbox("💉 Immunizations", value=True)
+        show_medications = st.checkbox("💊 Medications", value=True)
+    
+    # Fetch clinical data
+    clinical_data = fetch_patient_clinical_data(nosql_client, account_name, selected_patient_id)
+    
+    if not clinical_data.get("patient"):
+        st.warning("Could not load patient data.")
+        return
+    
+    # Build the graph
+    nodes = []
+    edges = []
+    
+    patient = clinical_data["patient"]
+    # Use helper to extract Gremlin property values
+    first_name = get_gremlin_property(patient, 'firstName', '')
+    last_name = get_gremlin_property(patient, 'lastName', '')
+    patient_name = f"{first_name} {last_name}".strip() or "Unknown"
+    birth_date = get_gremlin_property(patient, 'birthDate', 'N/A')
+    gender = get_gremlin_property(patient, 'gender', 'N/A')
+    
+    # Patient node (center)
+    nodes.append(Node(
+        id=selected_patient_id,
+        label=patient_name,
+        size=40,
+        color="#4CAF50",  # Green for patient
+        shape="circularImage",
+        image="https://img.icons8.com/color/96/user.png",
+        font={"size": 16, "color": "#333"},
+        title=f"Patient: {patient_name}\nDOB: {birth_date}\nGender: {gender}"
+    ))
+    
+    # Color scheme for different node types
+    node_colors = {
+        "Encounter": "#2196F3",      # Blue
+        "Observation": "#9C27B0",    # Purple
+        "Condition": "#F44336",      # Red
+        "Procedure": "#FF9800",      # Orange
+        "Immunization": "#00BCD4",   # Cyan
+        "Medication": "#E91E63",     # Pink
+        "Identifier": "#607D8B",     # Gray
+    }
+    
+    node_icons = {
+        "Encounter": "https://img.icons8.com/color/48/hospital.png",
+        "Observation": "https://img.icons8.com/color/48/microscope.png",
+        "Condition": "https://img.icons8.com/color/48/heart-with-pulse.png",
+        "Procedure": "https://img.icons8.com/color/48/surgical-scissors.png",
+        "Immunization": "https://img.icons8.com/color/48/syringe.png",
+        "Medication": "https://img.icons8.com/color/48/pill.png",
+        "Identifier": "https://img.icons8.com/color/48/identification-documents.png",
+    }
+    
+    # Add encounter nodes
+    if show_encounters:
+        for enc in clinical_data.get("encounters", [])[:20]:  # Limit for performance
+            enc_id = enc.get("id", "")
+            enc_type = get_gremlin_property(enc, "encounterType", get_gremlin_property(enc, "type", "Encounter"))
+            period_start = get_gremlin_property(enc, "periodStart", "")
+            enc_date = period_start[:10] if period_start else "N/A"
+            enc_status = get_gremlin_property(enc, "status", "N/A")
+            nodes.append(Node(
+                id=enc_id,
+                label=f"{enc_type[:20]}",
+                size=25,
+                color=node_colors["Encounter"],
+                shape="circularImage",
+                image=node_icons["Encounter"],
+                title=f"Encounter: {enc_type}\nDate: {enc_date}\nStatus: {enc_status}"
+            ))
+            edges.append(Edge(source=selected_patient_id, target=enc_id, label="HAS_ENCOUNTER", color="#2196F3"))
+    
+    # Add observation nodes
+    if show_observations:
+        for obs in clinical_data.get("observations", [])[:20]:
+            obs_id = obs.get("id", "")
+            obs_code = get_gremlin_property(obs, "codeDisplay", get_gremlin_property(obs, "code", "Observation"))
+            obs_value = get_gremlin_property(obs, "valueString", get_gremlin_property(obs, "value", ""))
+            eff_date = get_gremlin_property(obs, "effectiveDateTime", "")
+            obs_date = eff_date[:10] if eff_date else "N/A"
+            nodes.append(Node(
+                id=obs_id,
+                label=f"{str(obs_code)[:15]}",
+                size=20,
+                color=node_colors["Observation"],
+                shape="circularImage",
+                image=node_icons["Observation"],
+                title=f"Observation: {obs_code}\nValue: {obs_value}\nDate: {obs_date}"
+            ))
+            edges.append(Edge(source=selected_patient_id, target=obs_id, label="HAS_OBSERVATION", color="#9C27B0"))
+    
+    # Add condition nodes
+    if show_conditions:
+        for cond in clinical_data.get("conditions", [])[:20]:
+            cond_id = cond.get("id", "")
+            cond_code = get_gremlin_property(cond, "codeDisplay", get_gremlin_property(cond, "code", "Condition"))
+            cond_status = get_gremlin_property(cond, "clinicalStatus", "N/A")
+            onset = get_gremlin_property(cond, "onsetDateTime", "")
+            cond_onset = onset[:10] if onset else "N/A"
+            nodes.append(Node(
+                id=cond_id,
+                label=f"{str(cond_code)[:15]}",
+                size=22,
+                color=node_colors["Condition"],
+                shape="circularImage",
+                image=node_icons["Condition"],
+                title=f"Condition: {cond_code}\nStatus: {cond_status}\nOnset: {cond_onset}"
+            ))
+            edges.append(Edge(source=selected_patient_id, target=cond_id, label="HAS_CONDITION", color="#F44336"))
+    
+    # Add procedure nodes
+    if show_procedures:
+        for proc in clinical_data.get("procedures", [])[:20]:
+            proc_id = proc.get("id", "")
+            proc_code = get_gremlin_property(proc, "codeDisplay", get_gremlin_property(proc, "code", "Procedure"))
+            performed = get_gremlin_property(proc, "performedDateTime", "")
+            proc_date = performed[:10] if performed else "N/A"
+            proc_status = get_gremlin_property(proc, "status", "N/A")
+            nodes.append(Node(
+                id=proc_id,
+                label=f"{str(proc_code)[:15]}",
+                size=22,
+                color=node_colors["Procedure"],
+                shape="circularImage",
+                image=node_icons["Procedure"],
+                title=f"Procedure: {proc_code}\nDate: {proc_date}\nStatus: {proc_status}"
+            ))
+            edges.append(Edge(source=selected_patient_id, target=proc_id, label="HAS_PROCEDURE", color="#FF9800"))
+    
+    # Add immunization nodes
+    if show_immunizations:
+        for imm in clinical_data.get("immunizations", [])[:20]:
+            imm_id = imm.get("id", "")
+            imm_code = get_gremlin_property(imm, "vaccineDisplay", get_gremlin_property(imm, "vaccineCode", "Immunization"))
+            occurrence = get_gremlin_property(imm, "occurrenceDateTime", "")
+            imm_date = occurrence[:10] if occurrence else "N/A"
+            imm_status = get_gremlin_property(imm, "status", "N/A")
+            nodes.append(Node(
+                id=imm_id,
+                label=f"{str(imm_code)[:15]}",
+                size=20,
+                color=node_colors["Immunization"],
+                shape="circularImage",
+                image=node_icons["Immunization"],
+                title=f"Immunization: {imm_code}\nDate: {imm_date}\nStatus: {imm_status}"
+            ))
+            edges.append(Edge(source=selected_patient_id, target=imm_id, label="HAS_IMMUNIZATION", color="#00BCD4"))
+    
+    # Add medication nodes
+    if show_medications:
+        for med in clinical_data.get("medications", [])[:20]:
+            med_id = med.get("id", "")
+            med_code = get_gremlin_property(med, "medicationDisplay", get_gremlin_property(med, "medicationCode", "Medication"))
+            med_status = get_gremlin_property(med, "status", "N/A")
+            med_intent = get_gremlin_property(med, "intent", "N/A")
+            nodes.append(Node(
+                id=med_id,
+                label=f"{str(med_code)[:15]}",
+                size=20,
+                color=node_colors["Medication"],
+                shape="circularImage",
+                image=node_icons["Medication"],
+                title=f"Medication: {med_code}\nStatus: {med_status}\nIntent: {med_intent}"
+            ))
+            edges.append(Edge(source=selected_patient_id, target=med_id, label="HAS_MEDICATION", color="#E91E63"))
+    
+    # Graph configuration
+    config = Config(
+        width="100%",
+        height=600,
+        directed=True,
+        physics=True,
+        hierarchical=False,
+        nodeHighlightBehavior=True,
+        highlightColor="#F7A7A6",
+        collapsible=False,
+        node={
+            "labelProperty": "label",
+            "renderLabel": True,
+        },
+        link={
+            "labelProperty": "label",
+            "renderLabel": False,
+        }
+    )
+    
+    # Display statistics
+    st.markdown("---")
+    st.subheader("📊 Clinical Data Summary")
+    
+    cols = st.columns(6)
+    with cols[0]:
+        st.metric("Encounters", len(clinical_data.get("encounters", [])))
+    with cols[1]:
+        st.metric("Observations", len(clinical_data.get("observations", [])))
+    with cols[2]:
+        st.metric("Conditions", len(clinical_data.get("conditions", [])))
+    with cols[3]:
+        st.metric("Procedures", len(clinical_data.get("procedures", [])))
+    with cols[4]:
+        st.metric("Immunizations", len(clinical_data.get("immunizations", [])))
+    with cols[5]:
+        st.metric("Medications", len(clinical_data.get("medications", [])))
+    
+    st.markdown("---")
+    
+    # Render the graph
+    if len(nodes) > 1:
+        st.subheader("🕸️ Interactive Graph")
+        st.caption("Click and drag nodes to rearrange. Hover for details. Scroll to zoom.")
+        
+        return_value = agraph(nodes=nodes, edges=edges, config=config)
+        
+        # Legend
+        st.markdown("---")
+        st.subheader("🎨 Legend")
+        legend_cols = st.columns(7)
+        legend_items = [
+            ("👤 Patient", "#4CAF50"),
+            ("🏥 Encounter", "#2196F3"),
+            ("🔬 Observation", "#9C27B0"),
+            ("❤️ Condition", "#F44336"),
+            ("🔧 Procedure", "#FF9800"),
+            ("💉 Immunization", "#00BCD4"),
+            ("💊 Medication", "#E91E63"),
+        ]
+        for col, (label, color) in zip(legend_cols, legend_items):
+            with col:
+                st.markdown(f"<div style='background-color: {color}; color: white; padding: 5px 10px; border-radius: 5px; text-align: center;'>{label}</div>", unsafe_allow_html=True)
+    else:
+        st.info("No clinical data found for this patient. The graph will appear when clinical data is available.")
+    
+    # Expandable detailed data
+    with st.expander("📋 View Raw Clinical Data"):
+        tabs = st.tabs(["Encounters", "Observations", "Conditions", "Procedures", "Immunizations", "Medications"])
+        
+        with tabs[0]:
+            if clinical_data.get("encounters"):
+                st.json(clinical_data["encounters"][:10])
+            else:
+                st.info("No encounters found")
+        
+        with tabs[1]:
+            if clinical_data.get("observations"):
+                st.json(clinical_data["observations"][:10])
+            else:
+                st.info("No observations found")
+        
+        with tabs[2]:
+            if clinical_data.get("conditions"):
+                st.json(clinical_data["conditions"][:10])
+            else:
+                st.info("No conditions found")
+        
+        with tabs[3]:
+            if clinical_data.get("procedures"):
+                st.json(clinical_data["procedures"][:10])
+            else:
+                st.info("No procedures found")
+        
+        with tabs[4]:
+            if clinical_data.get("immunizations"):
+                st.json(clinical_data["immunizations"][:10])
+            else:
+                st.info("No immunizations found")
+        
+        with tabs[5]:
+            if clinical_data.get("medications"):
+                st.json(clinical_data["medications"][:10])
+            else:
+                st.info("No medications found")
 
 
 if __name__ == "__main__":

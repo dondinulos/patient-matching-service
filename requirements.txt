@@ -30,6 +30,7 @@ mypy>=1.0.0
 # Streamlit Dashboard
 streamlit>=1.30.0
 pandas>=2.0.0
+streamlit-agraph>=0.0.45  # Interactive graph visualization
 
 # Azure SDK
 azure-identity>=1.15.0
