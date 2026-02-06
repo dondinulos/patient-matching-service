@@ -334,6 +334,87 @@ async def find_matches(
     
     return [_match_to_response(r) for r in results]
 
+
+@app.post("/match/all", response_model=List[MatchResultResponse], tags=["Matching"])
+async def find_all_matches(
+    patient_id: str,
+    min_score: float = Query(default=0.3, ge=0.0, le=1.0),
+    max_results: int = Query(default=50, le=500),
+    service: PatientMatchingService = Depends(get_service)
+):
+    """
+    Find potential matches for a patient against ALL patients in the database.
+    
+    This performs a comprehensive search through the entire patient database,
+    comparing the specified patient against every other patient record.
+    Use for thorough duplicate detection.
+    """
+    results = service.find_all_matches_for_patient(
+        patient_id=patient_id,
+        min_score=min_score,
+        limit=max_results
+    )
+    
+    return [_match_to_response(r) for r in results]
+
+
+@app.post("/match/global", tags=["Matching"])
+async def run_global_matching(
+    min_score: float = Query(default=0.3, ge=0.0, le=1.0),
+    background_tasks: BackgroundTasks = None,
+    service: PatientMatchingService = Depends(get_service)
+):
+    """
+    Run matching for ALL patients against ALL other patients.
+    
+    This is a comprehensive matching operation that finds all potential
+    duplicate patient records in the database. Runs in background for
+    large databases.
+    
+    WARNING: This can be computationally expensive for large databases.
+    """
+    def global_match_task():
+        stats = service.run_global_matching(min_score=min_score)
+        logger.info(f"Global matching complete: {stats}")
+    
+    background_tasks.add_task(global_match_task)
+    
+    return {
+        "status": "started",
+        "message": "Global matching started in background",
+        "min_score": min_score
+    }
+
+
+@app.post("/match/batch", tags=["Matching"])
+async def run_batch_matching(
+    patient_ids: List[str] = None,
+    min_score: float = Query(default=0.3, ge=0.0, le=1.0),
+    background_tasks: BackgroundTasks = None,
+    service: PatientMatchingService = Depends(get_service)
+):
+    """
+    Run matching for a batch of patients (or all if no IDs provided).
+    
+    If patient_ids is not provided, matches all patients in the database.
+    Runs in background for efficiency.
+    """
+    def batch_match_task():
+        stats = service.run_batch_matching(
+            patient_ids=patient_ids,
+            min_score=min_score
+        )
+        logger.info(f"Batch matching complete: {stats}")
+    
+    background_tasks.add_task(batch_match_task)
+    
+    return {
+        "status": "started",
+        "message": f"Batch matching started for {len(patient_ids) if patient_ids else 'all'} patients",
+        "min_score": min_score
+    }
+
+
 @app.post("/match/compare", response_model=MatchResultResponse, tags=["Matching"])
 async def compare_patients(
     patient1_id: str,

@@ -80,9 +80,20 @@ def get_gremlin_property(vertex: dict, prop_name: str, default: str = "") -> str
     # If it's a list (Gremlin format), extract the first value
     if isinstance(prop, list) and len(prop) > 0:
         first_item = prop[0]
-        if isinstance(first_item, dict) and "value" in first_item:
-            return str(first_item["value"])
+        if isinstance(first_item, dict):
+            if "_value" in first_item:
+                return str(first_item["_value"])
+            if "value" in first_item:
+                return str(first_item["value"])
         return str(first_item)
+    
+    # If it's a dict with _value or value key (single Gremlin property)
+    if isinstance(prop, dict):
+        if "_value" in prop:
+            return str(prop["_value"])
+        if "value" in prop:
+            return str(prop["value"])
+        return str(prop)
     
     # If it's already a simple value, return it
     if prop is None:
@@ -1242,6 +1253,8 @@ def render_patient_graph(nosql_client, gremlin_client, account_name):
         show_immunizations = st.checkbox("💉 Immunizations", value=True)
         show_medications = st.checkbox("💊 Medications", value=True)
     
+    show_matched_patients = st.checkbox("🔗 Show Matched Patients", value=True, help="Show other patient records that have been matched to this patient")
+    
     # Fetch clinical data
     clinical_data = fetch_patient_clinical_data(nosql_client, account_name, selected_patient_id)
     
@@ -1282,6 +1295,7 @@ def render_patient_graph(nosql_client, gremlin_client, account_name):
         "Immunization": "#00BCD4",   # Cyan
         "Medication": "#E91E63",     # Pink
         "Identifier": "#607D8B",     # Gray
+        "MatchedPatient": "#FFD700", # Gold for matched patients
     }
     
     node_icons = {
@@ -1389,6 +1403,48 @@ def render_patient_graph(nosql_client, gremlin_client, account_name):
             ))
             edges.append(Edge(source=selected_patient_id, target=imm_id, label="HAS_IMMUNIZATION", color="#00BCD4"))
     
+    # Add matched patient nodes
+    if show_matched_patients:
+        match_results = fetch_match_results(nosql_client, account_name)
+        matched_added = set()  # Track added matched patient IDs to avoid duplicates
+        for m in match_results:
+            p1_id = m.get('patient1_id', '')
+            p2_id = m.get('patient2_id', '')
+            score = m.get('score', 0)
+            confidence = m.get('confidence', 'N/A')
+            emoji, conf_color = get_confidence_color(confidence)
+            
+            # Check if this match involves the selected patient
+            matched_id = None
+            matched_name = None
+            if p1_id == selected_patient_id:
+                matched_id = p2_id
+                matched_name = m.get('patient2_name', 'Unknown')
+            elif p2_id == selected_patient_id:
+                matched_id = p1_id
+                matched_name = m.get('patient1_name', 'Unknown')
+            
+            if matched_id and matched_id not in matched_added:
+                matched_added.add(matched_id)
+                nodes.append(Node(
+                    id=matched_id,
+                    label=f"{matched_name}",
+                    size=35,
+                    color=node_colors["MatchedPatient"],
+                    shape="circularImage",
+                    image="https://img.icons8.com/color/96/user.png",
+                    font={"size": 14, "color": "#333"},
+                    title=f"Matched Patient: {matched_name}\nID: {matched_id[:20]}...\nMatch Score: {score:.2f}\nConfidence: {confidence}"
+                ))
+                edges.append(Edge(
+                    source=selected_patient_id,
+                    target=matched_id,
+                    label=f"MATCHED ({score:.2f})",
+                    color=conf_color,
+                    width=3,
+                    dashes=False
+                ))
+
     # Add medication nodes
     if show_medications:
         for med in clinical_data.get("medications", [])[:20]:
@@ -1410,9 +1466,24 @@ def render_patient_graph(nosql_client, gremlin_client, account_name):
     # Graph configuration
     config = Config(
         width="100%",
-        height=600,
+        height=800,
         directed=True,
-        physics=True,
+        physics={
+            "enabled": True,
+            "barnesHut": {
+                "gravitationalConstant": -8000,
+                "centralGravity": 0.15,
+                "springLength": 250,
+                "springConstant": 0.02,
+                "damping": 0.09,
+                "avoidOverlap": 1.0,
+            },
+            "minVelocity": 0.75,
+            "stabilization": {
+                "enabled": True,
+                "iterations": 200,
+            },
+        },
         hierarchical=False,
         nodeHighlightBehavior=True,
         highlightColor="#F7A7A6",
@@ -1457,9 +1528,10 @@ def render_patient_graph(nosql_client, gremlin_client, account_name):
         # Legend
         st.markdown("---")
         st.subheader("🎨 Legend")
-        legend_cols = st.columns(7)
+        legend_cols = st.columns(8)
         legend_items = [
             ("👤 Patient", "#4CAF50"),
+            ("🔗 Matched", "#FFD700"),
             ("🏥 Encounter", "#2196F3"),
             ("🔬 Observation", "#9C27B0"),
             ("❤️ Condition", "#F44336"),

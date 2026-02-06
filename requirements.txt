@@ -15,6 +15,10 @@ jellyfish>=1.0.0
 # OpenAI for Embeddings (optional)
 openai>=1.0.0
 
+# Microsoft Agent Framework for AI Foundry Agent (preview)
+# Install with: pip install agent-framework-azure-ai --pre
+agent-framework-azure-ai
+
 # Utilities
 python-dotenv>=1.0.0
 

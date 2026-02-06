@@ -805,6 +805,29 @@ class CosmosGraphDB:
             "updatedAt": datetime.utcnow().isoformat()
         })
     
+    def store_potential_match(self, match: MatchResult) -> None:
+        """
+        Store a potential match relationship between two patients.
+        
+        Wrapper for create_potential_match that accepts a MatchResult object.
+        
+        Args:
+            match: MatchResult object containing match details
+        """
+        self.create_potential_match(
+            patient1_id=match.patient1_id,
+            patient2_id=match.patient2_id,
+            score=match.score,
+            confidence=match.confidence,
+            details={
+                "deterministic_score": match.deterministic_score,
+                "name_similarity": match.name_similarity,
+                "address_similarity": match.address_similarity,
+                "embedding_similarity": match.embedding_similarity,
+                "shared_identifiers": match.shared_identifiers
+            }
+        )
+    
     def get_potential_matches(
         self,
         patient_id: str,
@@ -1651,6 +1674,118 @@ class CosmosGraphDB:
             stats[f"matches_{confidence}"] = result[0] if result else 0
         
         return stats
+    
+    def get_patient_count(self) -> int:
+        """Get total number of patients in the database."""
+        query = "g.V().hasLabel('Patient').count()"
+        result = self._execute_query(query)
+        return result[0] if result else 0
+    
+    def get_empi_record_count(self) -> int:
+        """Get total number of EMPI records in the database."""
+        query = "g.V().hasLabel('EmpiRecord').count()"
+        result = self._execute_query(query)
+        return result[0] if result else 0
+    
+    def get_matches_for_review(
+        self,
+        min_score: float = 0.65,
+        max_score: float = 0.85,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """
+        Get potential matches that need human review.
+        
+        Args:
+            min_score: Minimum match score
+            max_score: Maximum match score
+            limit: Maximum number of matches to return
+        
+        Returns:
+            List of match pairs with patient and match details
+        """
+        # Query for POTENTIAL_MATCH edges in the human_review range
+        query = f"""
+            g.E().hasLabel('POTENTIAL_MATCH')
+            .has('score', gte({min_score}))
+            .has('score', lt({max_score}))
+            .has('confidence', 'human_review')
+            .limit({limit})
+            .project('edge', 'outV', 'inV')
+            .by(valueMap(true))
+            .by(outV().valueMap(true))
+            .by(inV().valueMap(true))
+        """
+        
+        try:
+            results = self._execute_query(query)
+            
+            matches = []
+            if results:
+                for record in results:
+                    edge_props = self._flatten_value_map(record.get('edge', {}))
+                    p1_props = self._flatten_value_map(record.get('outV', {}))
+                    p2_props = self._flatten_value_map(record.get('inV', {}))
+                    
+                    matches.append({
+                        "patient1": p1_props,
+                        "patient2": p2_props,
+                        "match": edge_props
+                    })
+            
+            return matches
+            
+        except Exception as e:
+            logger.error(f"Error getting matches for review: {e}")
+            return []
+    
+    def _flatten_value_map(self, value_map: Dict[str, Any]) -> Dict[str, Any]:
+        """Flatten Gremlin valueMap results (single-item lists become values)."""
+        result = {}
+        for key, value in value_map.items():
+            if isinstance(value, list) and len(value) == 1:
+                result[key] = value[0]
+            else:
+                result[key] = value
+        return result
+
+    def get_all_patient_ids(self, limit: int = None, offset: int = 0) -> List[str]:
+        """
+        Get all patient IDs in the database.
+        
+        Args:
+            limit: Maximum number of patient IDs to return (None for all)
+            offset: Number of records to skip
+        
+        Returns:
+            List of patient IDs
+        """
+        if limit:
+            query = f"g.V().hasLabel('Patient').range({offset}, {offset + limit}).values('id')"
+        else:
+            query = f"g.V().hasLabel('Patient').range({offset}, -1).values('id')"
+        
+        results = self._execute_query(query)
+        return results if results else []
+    
+    def get_all_patients(self, limit: int = None, offset: int = 0) -> List[Patient]:
+        """
+        Get all patients in the database with their full data.
+        
+        Args:
+            limit: Maximum number of patients to return (None for all)
+            offset: Number of records to skip
+        
+        Returns:
+            List of Patient objects
+        """
+        patient_ids = self.get_all_patient_ids(limit=limit, offset=offset)
+        patients = []
+        for pid in patient_ids:
+            patient = self.get_patient(pid)
+            if patient:
+                patients.append(patient)
+        return patients
     
     def clear_all(self) -> None:
         """Clear all data from the graph. Use with caution!"""

@@ -213,6 +213,132 @@ With LLM enabled:
 Final Score = (Traditional Score × 0.8) + (LLM Score × 0.2)
 ```
 
+## 🤖 AI Agent (Microsoft Agent Framework)
+
+The Patient Matching Service can be deployed as an **AI Agent** using the Microsoft Agent Framework for conversational access to patient matching capabilities.
+
+### Features
+
+- **Conversational Interface**: Ask questions naturally about patient matching
+- **Multi-Patient Matching**: Find matches against all patients in the database
+- **Match Decisions**: Approve or reject matches through conversation
+- **Service Statistics**: Get real-time stats about the MPI
+
+### Setup
+
+```bash
+# Install the Microsoft Agent Framework (preview)
+pip install agent-framework-azure-ai --pre
+```
+
+### Environment Variables
+
+```bash
+# Azure OpenAI Configuration
+export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com/"
+export AZURE_OPENAI_DEPLOYMENT="gpt-4o"
+
+# Database Configuration (Cosmos DB or Neo4j)
+export PM_DB_TYPE="cosmos"  # or "neo4j"
+export COSMOS_GREMLIN_ENDPOINT="your-account.gremlin.cosmos.azure.com"
+export COSMOS_DATABASE="patient-matching-db"
+export COSMOS_CONTAINER="patients"
+export COSMOS_KEY="your-key"
+```
+
+### Usage
+
+```python
+import asyncio
+from patient_matching.agent import create_patient_matching_agent
+
+async def main():
+    # Create the agent (uses AzureOpenAIChatClient)
+    agent = create_patient_matching_agent()
+    
+    # Single query
+    result = await agent.run("Find all matches for patient P123")
+    print(result.text)
+    
+    # Compare two patients
+    result = await agent.run("Compare patient abc-123 with patient xyz-456")
+    print(result.text)
+    
+    # Get service statistics
+    result = await agent.run("What are the current service statistics?")
+    print(result.text)
+
+asyncio.run(main())
+```
+
+### CLI Mode
+
+```bash
+# Run the agent in interactive mode
+python -m src.patient_matching.agent
+
+# Example conversation:
+# You: Find all potential matches for patient 92d2064d-11a2-44cc-843a-9547a3748eb4
+# Agent: I found 5 potential matches for the patient:
+#        1. Patient 3357f00c-... - Score: 0.95 (AUTO_MERGE)
+#        2. Patient fc0159e8-... - Score: 0.95 (AUTO_MERGE)
+#        ...
+#        These matches have highly similar details, indicating they are likely duplicates.
+```
+
+### Agent Tools
+
+| Tool | Description |
+|------|-------------|
+| `find_patient_matches` | Find potential matches for a patient (optional: search entire database) |
+| `get_patient_details` | Get detailed patient information |
+| `compare_two_patients` | Compare two specific patients with detailed scoring |
+| `run_batch_matching` | Run matching for all patients in the database |
+| `approve_patient_match` | Approve and merge two patients |
+| `reject_patient_match` | Reject a potential match |
+| `get_pending_reviews` | Get matches requiring human review |
+| `get_service_statistics` | Get MPI statistics |
+| `search_patients` | Search patients by name, DOB, or identifier |
+
+## 🔄 Multi-Patient Matching
+
+The service supports comprehensive matching against all patients in the database:
+
+### API Endpoints
+
+```bash
+# Find matches for a patient against ALL patients
+POST /match/all?patient_id=P123&min_score=0.3&max_results=50
+
+# Run global matching (all patients vs all patients)
+POST /match/global?min_score=0.3
+
+# Run batch matching for specific patients or all
+POST /match/batch?min_score=0.3
+```
+
+### Python API
+
+```python
+from patient_matching import PatientMatchingService
+
+service = PatientMatchingService(db_type="cosmos", ...)
+
+# Find all matches for a specific patient against entire database
+matches = service.find_all_matches_for_patient(
+    patient_id="P123",
+    min_score=0.3,
+    limit=100
+)
+
+# Run matching for all patients
+stats = service.run_global_matching(min_score=0.3)
+print(f"Found {stats['matches_found']} potential duplicates")
+
+# Run batch matching (with specific IDs or all)
+stats = service.run_batch_matching(patient_ids=None, min_score=0.3)
+```
+
 ## 🚀 Installation
 
 ### Prerequisites
@@ -220,6 +346,7 @@ Final Score = (Traditional Score × 0.8) + (LLM Score × 0.2)
 - Python 3.9+
 - Azure Cosmos DB account (Gremlin API)
 - Azure OpenAI service (optional, for AI features)
+- Microsoft Foundry project (optional, for AI Agent)
 
 ### Setup
 
@@ -233,6 +360,9 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# For AI Agent support (preview)
+pip install agent-framework-azure-ai --pre
 ```
 
 ### Environment Variables
@@ -244,10 +374,13 @@ export COSMOS_DATABASE="patient-matching-db"
 export COSMOS_CONTAINER="patients"
 export COSMOS_KEY="your-primary-key"
 
-# Azure OpenAI Configuration (optional)
+# Azure OpenAI Configuration (for AI features and Agent)
 export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com/"
+export AZURE_OPENAI_DEPLOYMENT="gpt-4o"
 export AZURE_OPENAI_EMBEDDING_DEPLOYMENT="text-embedding-ada-002"
-export AZURE_OPENAI_CHAT_DEPLOYMENT="gpt-4o"
+
+# Database Selection
+export PM_DB_TYPE="cosmos"  # or "neo4j"
 ```
 
 ## 📖 Usage
@@ -302,7 +435,8 @@ PatientMatching/
 │       ├── matching.py        # Matching algorithms (Deterministic, Probabilistic, AI)
 │       ├── fhir_loader.py     # FHIR data parsing
 │       ├── service.py         # Main service layer
-│       └── api.py             # FastAPI REST endpoints
+│       ├── api.py             # FastAPI REST endpoints
+│       └── agent.py           # AI Agent (Microsoft Agent Framework)
 ├── scripts/
 │   ├── load_fhir_to_cosmos.py # Load FHIR data to Cosmos DB
 │   └── run_matching.py        # Run batch matching

@@ -240,6 +240,131 @@ class PatientMatchingService:
         
         return results
     
+    def find_all_matches_for_patient(
+        self,
+        patient_id: str,
+        min_score: float = 0.3,
+        limit: int = None,
+        batch_size: int = 100
+    ) -> List[MatchResult]:
+        """
+        Find all potential matches for a patient against the ENTIRE database.
+        
+        This method iterates through all patients in the database and computes
+        match scores against the target patient. Use for comprehensive matching.
+        
+        Args:
+            patient_id: ID of patient to match
+            min_score: Minimum score threshold
+            limit: Maximum number of matches to return (None for all)
+            batch_size: Number of patients to process per batch
+        
+        Returns:
+            List of MatchResults sorted by score descending
+        """
+        patient = self.db.get_patient(patient_id)
+        if not patient:
+            logger.error(f"Patient not found: {patient_id}")
+            return []
+        
+        all_results = []
+        offset = 0
+        
+        while True:
+            # Get batch of patients
+            candidates = self.db.get_all_patients(limit=batch_size, offset=offset)
+            
+            if not candidates:
+                break
+            
+            # Filter out the target patient and compute matches
+            for candidate in candidates:
+                if candidate.id == patient_id:
+                    continue
+                
+                result = self.matcher.match(patient, candidate)
+                
+                if result.score >= min_score:
+                    all_results.append(result)
+                    # Store potential match in graph
+                    self.db.store_potential_match(result)
+            
+            offset += batch_size
+            logger.info(f"Processed {offset} patients for matching...")
+        
+        # Sort by score descending
+        all_results.sort(key=lambda r: r.score, reverse=True)
+        
+        # Apply limit if specified
+        if limit:
+            all_results = all_results[:limit]
+        
+        logger.info(f"Found {len(all_results)} matches for patient {patient_id} against entire database")
+        return all_results
+    
+    def run_global_matching(
+        self,
+        min_score: float = 0.3,
+        batch_size: int = 100
+    ) -> Dict[str, Any]:
+        """
+        Run matching for ALL patients against ALL other patients.
+        
+        This is a comprehensive matching operation that finds all potential
+        duplicate patient records in the database. Use for initial MPI setup
+        or periodic comprehensive matching.
+        
+        WARNING: This can be computationally expensive for large databases.
+        Consider using run_batch_matching with specific patient IDs for 
+        incremental matching.
+        
+        Args:
+            min_score: Minimum score threshold
+            batch_size: Number of patients to process per batch
+        
+        Returns:
+            Summary statistics
+        """
+        stats = {
+            "total_patients": 0,
+            "patients_processed": 0,
+            "matches_found": 0,
+            "auto_merge": 0,
+            "human_review": 0,
+            "unique_pairs": set()
+        }
+        
+        stats["total_patients"] = self.db.get_patient_count()
+        logger.info(f"Starting global matching for {stats['total_patients']} patients")
+        
+        # Get all patient IDs
+        all_patient_ids = self.db.get_all_patient_ids()
+        
+        for pid in all_patient_ids:
+            results = self.find_matches_for_patient(pid, min_score)
+            stats["patients_processed"] += 1
+            
+            for r in results:
+                # Create a sorted tuple to avoid counting pairs twice
+                pair = tuple(sorted([r.patient1_id, r.patient2_id]))
+                if pair not in stats["unique_pairs"]:
+                    stats["unique_pairs"].add(pair)
+                    stats["matches_found"] += 1
+                    
+                    if r.confidence == MatchConfidence.AUTO_MERGE:
+                        stats["auto_merge"] += 1
+                    elif r.confidence == MatchConfidence.HUMAN_REVIEW:
+                        stats["human_review"] += 1
+            
+            if stats["patients_processed"] % 100 == 0:
+                logger.info(f"Processed {stats['patients_processed']}/{stats['total_patients']} patients...")
+        
+        # Convert set to count for serialization
+        stats["unique_pairs"] = len(stats["unique_pairs"])
+        
+        logger.info(f"Global matching complete: {stats}")
+        return stats
+    
     def run_batch_matching(
         self,
         patient_ids: List[str] = None,
@@ -249,7 +374,7 @@ class PatientMatchingService:
         Run matching for multiple patients
         
         Args:
-            patient_ids: List of patient IDs to match (None = all)
+            patient_ids: List of patient IDs to match (None = all patients)
             min_score: Minimum score threshold
         
         Returns:
@@ -264,9 +389,9 @@ class PatientMatchingService:
         }
         
         if patient_ids is None:
-            # Would need to implement get_all_patient_ids
-            logger.warning("Batch matching without patient_ids not implemented")
-            return stats
+            # Get all patient IDs from the database
+            patient_ids = self.db.get_all_patient_ids()
+            logger.info(f"Running batch matching for all {len(patient_ids)} patients")
         
         for pid in patient_ids:
             results = self.find_matches_for_patient(pid, min_score)

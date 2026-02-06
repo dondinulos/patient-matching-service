@@ -775,6 +775,49 @@ class PatientGraphDB:
             result = session.run("MATCH (p:Patient) RETURN count(p) as count")
             return result.single()["count"]
     
+    def get_all_patient_ids(self, limit: int = None, offset: int = 0) -> List[str]:
+        """
+        Get all patient IDs in the database.
+        
+        Args:
+            limit: Maximum number of patient IDs to return (None for all)
+            offset: Number of records to skip
+        
+        Returns:
+            List of patient IDs
+        """
+        with self.connection.get_session() as session:
+            if limit:
+                result = session.run(
+                    "MATCH (p:Patient) RETURN p.id as id ORDER BY p.id SKIP $offset LIMIT $limit",
+                    {"offset": offset, "limit": limit}
+                )
+            else:
+                result = session.run(
+                    "MATCH (p:Patient) RETURN p.id as id ORDER BY p.id SKIP $offset",
+                    {"offset": offset}
+                )
+            return [r["id"] for r in result]
+    
+    def get_all_patients(self, limit: int = None, offset: int = 0) -> List[Patient]:
+        """
+        Get all patients in the database with their full data.
+        
+        Args:
+            limit: Maximum number of patients to return (None for all)
+            offset: Number of records to skip
+        
+        Returns:
+            List of Patient objects
+        """
+        patient_ids = self.get_all_patient_ids(limit=limit, offset=offset)
+        patients = []
+        for pid in patient_ids:
+            patient = self.get_patient(pid)
+            if patient:
+                patients.append(patient)
+        return patients
+    
     def get_empi_record_count(self) -> int:
         """Get total number of EMPI records"""
         with self.connection.get_session() as session:
