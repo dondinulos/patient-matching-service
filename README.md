@@ -123,6 +123,7 @@ This service provides comprehensive patient identity resolution through multiple
 ## 🖥️ Web Dashboard (Streamlit)
 
 The Patient Matching Service includes a full-featured **Streamlit dashboard** for visualizing and managing match results.
+![Dashboard - Patient Graph](dashboard.png)
 
 ### Dashboard Features
 
