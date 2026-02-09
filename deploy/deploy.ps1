@@ -46,10 +46,12 @@ param(
     [switch]$SkipBuild
 )
 
-# Configuration
-$SubscriptionId = "cde003d3-960c-474d-a3a8-aa57d803282f"
-$TenantId = "REDACTED"
-$ResourceGroup = "rg-patient-matching"
+# Configuration - set via environment variables
+if (-not $env:AZURE_SUBSCRIPTION_ID) { Write-Error "AZURE_SUBSCRIPTION_ID environment variable is required"; exit 1 }
+if (-not $env:AZURE_TENANT_ID) { Write-Error "AZURE_TENANT_ID environment variable is required"; exit 1 }
+$SubscriptionId = $env:AZURE_SUBSCRIPTION_ID
+$TenantId = $env:AZURE_TENANT_ID
+$ResourceGroup = if ($env:AZURE_RESOURCE_GROUP) { $env:AZURE_RESOURCE_GROUP } else { "rg-patient-matching" }
 $BaseName = "patientmatch"
 
 # Colors for output

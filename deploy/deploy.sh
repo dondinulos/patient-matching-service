@@ -11,10 +11,10 @@
 
 set -e
 
-# Configuration
-SUBSCRIPTION_ID="cde003d3-960c-474d-a3a8-aa57d803282f"
-TENANT_ID="REDACTED"
-RESOURCE_GROUP="rg-patient-matching"
+# Configuration - set via environment variables
+SUBSCRIPTION_ID="${AZURE_SUBSCRIPTION_ID:?Error: AZURE_SUBSCRIPTION_ID environment variable is required}"
+TENANT_ID="${AZURE_TENANT_ID:?Error: AZURE_TENANT_ID environment variable is required}"
+RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-rg-patient-matching}"
 BASE_NAME="patientmatch"
 
 # Defaults

@@ -108,8 +108,11 @@ def get_cosmos_clients():
     try:
         credential = AzureCliCredential()
         
-        # Get Cosmos DB account name from environment or discover it
-        account_name = os.environ.get("COSMOS_ACCOUNT_NAME", "REDACTED")
+        # Get Cosmos DB account name from environment
+        account_name = os.environ.get("COSMOS_ACCOUNT_NAME")
+        if not account_name:
+            st.error("COSMOS_ACCOUNT_NAME environment variable is required")
+            return None, None, None
         
         # NoSQL client for match_results
         nosql_endpoint = f"https://{account_name}.documents.azure.com:443/"
