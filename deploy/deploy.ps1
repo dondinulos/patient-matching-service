@@ -52,7 +52,7 @@ if (-not $env:AZURE_TENANT_ID) { Write-Error "AZURE_TENANT_ID environment variab
 $SubscriptionId = $env:AZURE_SUBSCRIPTION_ID
 $TenantId = $env:AZURE_TENANT_ID
 $ResourceGroup = if ($env:AZURE_RESOURCE_GROUP) { $env:AZURE_RESOURCE_GROUP } else { "rg-patient-matching" }
-$BaseName = "patientmatch"
+python -m src.patient_matching.agent --foundry$BaseName = "patientmatch"
 
 # Colors for output
 function Write-Info { param($Message) Write-Host "[INFO] $Message" -ForegroundColor Cyan }

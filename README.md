@@ -6,6 +6,8 @@ A comprehensive **Master Patient Index (MPI)** solution for healthcare data inte
 ![Azure](https://img.shields.io/badge/Azure-Cosmos%20DB-0078D4.svg)
 ![OpenAI](https://img.shields.io/badge/OpenAI-GPT--4o-412991.svg)
 ![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-FF4B4B.svg)
+![MCP](https://img.shields.io/badge/MCP-Server-8A2BE2.svg)
+![Agent](https://img.shields.io/badge/Agent-Framework-FF6F00.svg)
 
 ## 🎯 Overview
 
@@ -21,6 +23,8 @@ This service provides comprehensive patient identity resolution through multiple
 | **EMPI Management** | Enterprise Master Patient Index record creation and maintenance |
 | **Human Review Workflow** | Queue for ambiguous matches requiring manual review |
 | **Web Dashboard** | Streamlit-based UI for viewing and managing match results |
+| **AI Agent Chat** | Conversational agent (Azure AI Foundry) embedded in the dashboard |
+| **MCP Server** | Model Context Protocol server for IDE/tool integration |
 
 ## 🏗️ Architecture
 
@@ -104,8 +108,10 @@ This service provides comprehensive patient identity resolution through multiple
 │  • POST /patients       │    │  📊 Dashboard Overview  │    │  • Load FHIR data       │
 │  • POST /match          │    │  🔍 Match Results       │    │  • Run batch matching   │
 │  • GET /reviews/pending │    │  👥 Patients List       │    │  • Export results       │
-│  • POST /empi/merge     │    │  📋 Review Queue        │    │                         │
-│  • GET /config/weights  │    │  ⚙️ Settings            │    │                         │
+│  • POST /empi/merge     │    │  �️ Patient Graph       │    │                         │
+│  • GET /config/weights  │    │  📋 Review Queue        │    │                         │
+│                         │    │  🤖 Agent Chat          │    │                         │
+│                         │    │  ⚙️ Settings            │    │                         │
 │                         │    │                         │    │                         │
 │  http://localhost:8000  │    │  http://localhost:8503  │    │  python scripts/...     │
 └─────────────────────────┘    └─────────────────────────┘    └─────────────────────────┘
@@ -117,6 +123,10 @@ This service provides comprehensive patient identity resolution through multiple
 │  │ (Gremlin +   │  │ (GPT-4o +    │  │ Apps         │  │ Workspace                   ││
 │  │  NoSQL)      │  │  Embeddings) │  │              │  │                             ││
 │  └──────────────┘  └──────────────┘  └──────────────┘  └───────────────────────────────┘│
+│                    ┌──────────────┐                                                      │
+│                    │ AI Foundry   │                                                      │
+│                    │ Agent Service│                                                      │
+│                    └──────────────┘                                                      │
 └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -131,9 +141,11 @@ The Patient Matching Service includes a full-featured **Streamlit dashboard** fo
 |------|-------------|
 | **📊 Dashboard** | Overview with key metrics, score distribution charts, and recent matches |
 | **🔍 Match Results** | Filterable list of all matches with detailed score breakdowns |
-| **👥 Patients** | Browse and search loaded patients |
+| **👥 Patients** | Browse and search loaded patients with clinical data |
+| **🕸️ Patient Graph** | Interactive graph visualization of patient relationships (streamlit-agraph) |
 | **📋 Review Queue** | Pending human review items with approve/reject actions |
-| **⚙️ Settings** | Configure match weights and thresholds |
+| **🤖 Agent Chat** | Conversational AI agent for natural language patient queries |
+| **⚙️ Settings** | Configure match weights, thresholds, and theme |
 
 ### Match Details View
 
@@ -172,9 +184,10 @@ Access at: **http://localhost:8503**
 │  📊 Dashboard │                                                  │
 │  🔍 Results   │  ┌─────────────────────────────────────────────┐│
 │  👥 Patients  │  │ Score Distribution        Confidence Dist.  ││
-│  📋 Review    │  │  ████████░░  0.8-1.0     🟢 auto_merge: 3   ││
-│  ⚙️ Settings  │  │  ██████████  0.6-0.8     🟡 human_review: 0 ││
-│               │  │  ████░░░░░░  0.4-0.6     🔴 no_match: 67    ││
+│  �️ Graph     │  │  ████████░░  0.8-1.0     🟢 auto_merge: 3   ││
+│  📋 Review    │  │  ██████████  0.6-0.8     🟡 human_review: 0 ││
+│  🤖 Agent     │  │  ████░░░░░░  0.4-0.6     🔴 no_match: 67    ││
+│  ⚙️ Settings  │  └─────────────────────────────────────────────┘│
 │  ✅ Connected │  └─────────────────────────────────────────────┘│
 └───────────────┴─────────────────────────────────────────────────┘
 ```
@@ -216,11 +229,13 @@ Final Score = (Traditional Score × 0.8) + (LLM Score × 0.2)
 
 ## 🤖 AI Agent (Microsoft Agent Framework)
 
-The Patient Matching Service can be deployed as an **AI Agent** using the Microsoft Agent Framework for conversational access to patient matching capabilities.
+The Patient Matching Service can be deployed as an **AI Agent** using the Microsoft Agent Framework, available both as a standalone CLI and embedded in the Streamlit dashboard.
 
 ### Features
 
 - **Conversational Interface**: Ask questions naturally about patient matching
+- **Dashboard Integration**: Agent Chat tab in the Streamlit dashboard for browser-based use
+- **Azure AI Foundry Deployment**: Server-side agent hosted in Azure AI Foundry Agent Service
 - **Multi-Patient Matching**: Find matches against all patients in the database
 - **Match Decisions**: Approve or reject matches through conversation
 - **Service Statistics**: Get real-time stats about the MPI
@@ -238,6 +253,9 @@ pip install agent-framework-azure-ai --pre
 # Azure OpenAI Configuration
 export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com/"
 export AZURE_OPENAI_DEPLOYMENT="gpt-4o"
+
+# Azure AI Foundry (for Foundry Agent Service)
+export AZURE_AI_FOUNDRY_PROJECT_ENDPOINT="https://your-resource.services.ai.azure.com/api/projects/your-project"
 
 # Database Configuration (Cosmos DB or Neo4j)
 export PM_DB_TYPE="cosmos"  # or "neo4j"
@@ -275,8 +293,11 @@ asyncio.run(main())
 ### CLI Mode
 
 ```bash
-# Run the agent in interactive mode
+# Run the agent in interactive mode (direct Azure OpenAI)
 python -m src.patient_matching.agent
+
+# Run with Azure AI Foundry Agent Service
+python -m src.patient_matching.agent --foundry
 
 # Example conversation:
 # You: Find all potential matches for patient 92d2064d-11a2-44cc-843a-9547a3748eb4
@@ -301,7 +322,31 @@ python -m src.patient_matching.agent
 | `get_service_statistics` | Get MPI statistics |
 | `search_patients` | Search patients by name, DOB, or identifier |
 
-## 🔄 Multi-Patient Matching
+## � MCP Server (Model Context Protocol)
+
+The service exposes a **Model Context Protocol (MCP)** server for integration with AI-powered IDEs, coding assistants, and other tools.
+
+### Features
+
+- Exposes all patient matching tools via the MCP standard
+- Works with any MCP-compatible client (VS Code Copilot, Claude Desktop, etc.)
+- Same tool set as the AI Agent
+
+### Running the MCP Server
+
+```bash
+# Start with the MCP inspector for development
+mcp dev src/patient_matching/mcp_server.py
+
+# Or run directly
+python src/patient_matching/mcp_server.py
+```
+
+### Available MCP Tools
+
+All 9 agent tools are exposed as MCP tools: `find_patient_matches`, `get_patient_details`, `compare_two_patients`, `run_batch_matching`, `approve_patient_match`, `reject_patient_match`, `get_pending_reviews`, `get_service_statistics`, and `search_patients`.
+
+## �🔄 Multi-Patient Matching
 
 The service supports comprehensive matching against all patients in the database:
 
@@ -437,12 +482,14 @@ PatientMatching/
 │       ├── fhir_loader.py     # FHIR data parsing
 │       ├── service.py         # Main service layer
 │       ├── api.py             # FastAPI REST endpoints
-│       └── agent.py           # AI Agent (Microsoft Agent Framework)
+│       ├── agent.py           # AI Agent (Microsoft Agent Framework)
+│       └── mcp_server.py     # MCP Server (Model Context Protocol)
 ├── scripts/
 │   ├── load_fhir_to_cosmos.py # Load FHIR data to Cosmos DB
 │   └── run_matching.py        # Run batch matching
 ├── tests/
 │   ├── test_matching.py       # Unit tests for matching algorithms
+│   ├── test_mcp_server.py     # MCP server tool tests
 │   └── test_with_fhir_data.py # Integration tests with FHIR data
 ├── data/
 │   └── fhir/                  # Sample FHIR bundle files
@@ -519,8 +566,8 @@ Provides intelligent match reasoning:
 | Resource | Description |
 |----------|-------------|
 | **Azure Cosmos DB** | Gremlin + NoSQL APIs for graph and document storage |
-| **Azure OpenAI** | GPT-4o and text-embedding-ada-002 models |
-| **Azure Container Apps** | Hosts the Patient Matching API |
+| **Azure OpenAI / AI Foundry** | GPT-4o, text-embedding-ada-002, and Foundry Agent Service |
+| **Azure Container Apps** | Hosts the Patient Matching API and Dashboard |
 | **Azure Container Registry** | Docker image storage |
 | **Log Analytics** | Monitoring and diagnostics |
 

@@ -49,6 +49,12 @@ def get_service() -> PatientMatchingService:
     if _service is None:
         # Initialize service with configuration from environment
         db_type = os.getenv("PM_DB_TYPE", "cosmos")
+        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        azure_key = os.getenv("AZURE_OPENAI_API_KEY")
+        use_azure = bool(azure_endpoint)
+        # Enable embeddings/LLM if Azure OpenAI is configured or explicit env vars set
+        use_embeddings = os.getenv("USE_EMBEDDINGS", str(use_azure)).lower() == "true"
+        use_llm = os.getenv("USE_LLM", str(use_azure)).lower() == "true"
         
         _service = PatientMatchingService(
             # Neo4j configuration
@@ -63,11 +69,20 @@ def get_service() -> PatientMatchingService:
             # Database selection
             db_type=db_type,
             # Matching configuration
-            use_embeddings=os.getenv("USE_EMBEDDINGS", "false").lower() == "true",
-            openai_api_key=os.getenv("OPENAI_API_KEY")
+            use_embeddings=use_embeddings,
+            use_llm=use_llm,
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+            # Azure OpenAI configuration
+            use_azure_openai=use_azure,
+            azure_openai_endpoint=azure_endpoint,
+            azure_openai_key=azure_key,
+            azure_openai_embedding_deployment=os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-ada-002"),
+            azure_openai_gpt_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o"),
+            azure_openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01")
         )
         _service.initialize()
-        logger.info(f"Patient Matching Service initialized with {db_type} backend")
+        logger.info(f"Patient Matching Service initialized with {db_type} backend"
+                    f" (embeddings={use_embeddings}, llm={use_llm}, azure={use_azure})")
     
     return _service
 
@@ -110,15 +125,20 @@ def find_patient_matches(
         
         results = []
         for match in matches:
-            results.append({
+            result = {
                 "matched_patient_id": match.patient2_id,
                 "score": round(match.score, 3),
                 "confidence": match.confidence.value,
                 "deterministic_score": round(match.deterministic_score, 3),
                 "name_similarity": round(match.name_similarity, 3),
                 "address_similarity": round(match.address_similarity, 3),
+                "embedding_similarity": round(match.embedding_similarity, 3),
                 "shared_identifiers": match.shared_identifiers
-            })
+            }
+            # Include LLM analysis if present
+            if match.match_details.get("llm_analysis"):
+                result["llm_analysis"] = match.match_details["llm_analysis"]
+            results.append(result)
         
         return json.dumps({
             "patient_id": patient_id,
@@ -475,6 +495,44 @@ def get_patient_matching_tools() -> list:
     ]
 
 
+AGENT_INSTRUCTIONS = """You are a Patient Matching Assistant that helps healthcare administrators 
+manage patient identity matching and Master Patient Index (MPI) operations.
+
+Your capabilities include:
+1. Finding potential duplicate patient records by comparing against all patients in the database
+2. Getting detailed patient information
+3. Comparing two specific patients to determine if they're the same person
+4. Running batch matching operations across the entire patient database
+5. Approving or rejecting match decisions
+6. Viewing pending match reviews
+7. Getting service statistics
+
+When users ask about patient matching:
+- Use find_patient_matches to search for potential duplicates
+- Use compare_two_patients for detailed comparison between specific patients
+- Use search_patients to find patients by name, birth date, or identifier
+
+Always explain the match confidence levels:
+- AUTO_MERGE (score >= 0.85): High confidence - these are very likely the same person
+- HUMAN_REVIEW (score 0.65-0.85): Medium confidence - requires human verification
+- NO_MATCH (score < 0.65): Low confidence - likely different people
+
+When presenting match results, ALWAYS show the full score breakdown for each match including:
+- Overall score and confidence level
+- Deterministic score (identifier matches)
+- Name similarity score
+- Address similarity score
+- Embedding similarity score (AI semantic matching)
+- LLM analysis (if available)
+- Shared identifiers
+
+Present each match with all these details in a structured format. Do not summarize or abbreviate
+the score details even when multiple matches have similar scores.
+
+Be helpful and explain the matching results clearly to help users make informed decisions
+about patient identity management."""
+
+
 def create_patient_matching_agent(
     endpoint: str = None,
     deployment_name: str = None,
@@ -501,7 +559,7 @@ def create_patient_matching_agent(
     """
     from agent_framework import ChatAgent
     from agent_framework.azure import AzureOpenAIChatClient
-    from azure.identity import AzureCliCredential
+    from azure.identity import DefaultAzureCredential
     
     aoai_endpoint = endpoint or os.getenv("AZURE_OPENAI_ENDPOINT")
     deployment = deployment_name or os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
@@ -512,8 +570,8 @@ def create_patient_matching_agent(
             "Set AZURE_OPENAI_ENDPOINT environment variable or pass endpoint parameter."
         )
     
-    # Use Azure CLI credential for authentication
-    credential = AzureCliCredential()
+    # Use DefaultAzureCredential for both local (CLI) and deployed (managed identity) scenarios
+    credential = DefaultAzureCredential()
     
     # Create the chat client
     chat_client = AzureOpenAIChatClient(
@@ -525,46 +583,102 @@ def create_patient_matching_agent(
     # Create agent using as_agent() pattern
     return chat_client.as_agent(
         name=agent_name,
-        instructions="""You are a Patient Matching Assistant that helps healthcare administrators 
-manage patient identity matching and Master Patient Index (MPI) operations.
-
-Your capabilities include:
-1. Finding potential duplicate patient records by comparing against all patients in the database
-2. Getting detailed patient information
-3. Comparing two specific patients to determine if they're the same person
-4. Running batch matching operations across the entire patient database
-5. Approving or rejecting match decisions
-6. Viewing pending match reviews
-7. Getting service statistics
-
-When users ask about patient matching:
-- Use find_patient_matches to search for potential duplicates
-- Use compare_two_patients for detailed comparison between specific patients
-- Use search_patients to find patients by name, birth date, or identifier
-
-Always explain the match confidence levels:
-- AUTO_MERGE (score >= 0.85): High confidence - these are very likely the same person
-- HUMAN_REVIEW (score 0.65-0.85): Medium confidence - requires human verification
-- NO_MATCH (score < 0.65): Low confidence - likely different people
-
-Be helpful and explain the matching results clearly to help users make informed decisions
-about patient identity management.""",
+        instructions=AGENT_INSTRUCTIONS,
         tools=get_patient_matching_tools()
+    )
+
+
+def create_foundry_agent(
+    project_endpoint: str = None,
+    deployment_name: str = None,
+    agent_name: str = "PatientMatchingAgent"
+):
+    """
+    Create a Patient Matching Agent deployed to Azure AI Foundry Agent Service.
+    
+    The agent is registered server-side in the Foundry project and can be
+    accessed via the Foundry API, Foundry portal, or any Agent Framework client.
+    
+    Args:
+        project_endpoint: Foundry project endpoint (or AZURE_AI_FOUNDRY_PROJECT_ENDPOINT env var)
+            Format: https://<resource>.services.ai.azure.com/api/projects/<project-name>
+        deployment_name: Model deployment name (or AZURE_OPENAI_DEPLOYMENT env var)
+        agent_name: Name for the agent (alphanumeric and hyphens only, max 63 chars)
+    
+    Returns:
+        Async context manager yielding a configured Foundry ChatAgent
+    
+    Usage:
+        async with create_foundry_agent() as agent:
+            result = await agent.run("Find matches for patient P123")
+            print(result.text)
+    """
+    from agent_framework.azure import AzureAIClient
+    from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
+
+    project_ep = project_endpoint or os.getenv("AZURE_AI_FOUNDRY_PROJECT_ENDPOINT")
+    deployment = deployment_name or os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+
+    if not project_ep:
+        raise ValueError(
+            "Foundry project endpoint required. "
+            "Set AZURE_AI_FOUNDRY_PROJECT_ENDPOINT environment variable or pass project_endpoint parameter. "
+            "Format: https://<resource>.services.ai.azure.com/api/projects/<project-name>"
+        )
+
+    credential = AsyncDefaultAzureCredential()
+
+    client = AzureAIClient(
+        project_endpoint=project_ep,
+        model_deployment_name=deployment,
+        credential=credential,
+    )
+
+    return client.as_agent(
+        name=agent_name,
+        instructions=AGENT_INSTRUCTIONS,
+        tools=get_patient_matching_tools(),
     )
 
 
 # ==================== CLI Entry Point ====================
 
 async def main():
-    """Run the Patient Matching Agent in interactive mode."""
+    """Run the Patient Matching Agent in interactive mode.
     
+    Uses Foundry Agent Service if AZURE_AI_FOUNDRY_PROJECT_ENDPOINT is set,
+    otherwise falls back to direct Azure OpenAI.
+    """
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Patient Matching Agent")
+    parser.add_argument(
+        "--foundry", action="store_true",
+        help="Use Azure AI Foundry Agent Service (requires AZURE_AI_FOUNDRY_PROJECT_ENDPOINT)"
+    )
+    args = parser.parse_args()
+
+    use_foundry = args.foundry or os.getenv("AZURE_AI_FOUNDRY_PROJECT_ENDPOINT")
+
     print("Patient Matching Agent")
     print("=" * 50)
+    if use_foundry:
+        print("Mode: Azure AI Foundry Agent Service")
+    else:
+        print("Mode: Direct Azure OpenAI")
     print("Type your questions about patient matching, or 'quit' to exit.")
     print()
-    
-    agent = create_patient_matching_agent()
-    
+
+    if use_foundry:
+        async with create_foundry_agent() as agent:
+            await _interactive_loop(agent)
+    else:
+        agent = create_patient_matching_agent()
+        await _interactive_loop(agent)
+
+
+async def _interactive_loop(agent):
+    """Run the interactive conversation loop."""
     while True:
         try:
             user_input = input("You: ").strip()

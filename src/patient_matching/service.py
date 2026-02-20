@@ -54,7 +54,15 @@ class PatientMatchingService:
         # Matching configuration
         weights: MatchWeights = None,
         use_embeddings: bool = False,
-        openai_api_key: str = None
+        use_llm: bool = False,
+        openai_api_key: str = None,
+        # Azure OpenAI configuration
+        use_azure_openai: bool = False,
+        azure_openai_endpoint: str = None,
+        azure_openai_key: str = None,
+        azure_openai_embedding_deployment: str = None,
+        azure_openai_gpt_deployment: str = None,
+        azure_openai_api_version: str = "2024-02-01"
     ):
         """
         Initialize the service
@@ -70,7 +78,14 @@ class PatientMatchingService:
             db_type: Database type ("neo4j" or "cosmos")
             weights: Custom match weights
             use_embeddings: Enable OpenAI embeddings
+            use_llm: Enable LLM-based deep analysis
             openai_api_key: OpenAI API key
+            use_azure_openai: Use Azure OpenAI instead of OpenAI
+            azure_openai_endpoint: Azure OpenAI endpoint URL
+            azure_openai_key: Azure OpenAI API key
+            azure_openai_embedding_deployment: Azure deployment for embeddings
+            azure_openai_gpt_deployment: Azure deployment for GPT model
+            azure_openai_api_version: Azure OpenAI API version
         """
         self.db_type = db_type
         
@@ -98,7 +113,14 @@ class PatientMatchingService:
         self.matcher = PatientMatcher(
             weights=weights,
             use_embeddings=use_embeddings,
-            openai_api_key=openai_api_key
+            use_llm=use_llm,
+            openai_api_key=openai_api_key,
+            use_azure_openai=use_azure_openai,
+            azure_openai_endpoint=azure_openai_endpoint,
+            azure_openai_key=azure_openai_key,
+            azure_openai_embedding_deployment=azure_openai_embedding_deployment,
+            azure_openai_gpt_deployment=azure_openai_gpt_deployment,
+            azure_openai_api_version=azure_openai_api_version
         )
         
         self.weights = weights or MatchWeights()

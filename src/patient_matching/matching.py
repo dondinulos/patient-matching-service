@@ -788,6 +788,7 @@ class PatientMatcher:
                     self.embedding_matcher = EmbeddingMatcher(
                         api_key=azure_openai_key,
                         use_azure=True,
+                        use_azure_ad=not azure_openai_key,
                         azure_endpoint=azure_openai_endpoint,
                         azure_deployment=azure_openai_embedding_deployment,
                         azure_api_version=azure_openai_api_version
@@ -810,6 +811,7 @@ class PatientMatcher:
                         api_key=azure_openai_key,
                         model=llm_model,
                         use_azure=True,
+                        use_azure_ad=not azure_openai_key,
                         azure_endpoint=azure_openai_endpoint,
                         azure_deployment=azure_openai_gpt_deployment,
                         azure_api_version=azure_openai_api_version
@@ -961,7 +963,7 @@ class PatientMatcher:
         patient: Patient,
         candidates: List[Patient],
         min_score: float = 0.3,
-        compute_embeddings: bool = False
+        compute_embeddings: bool = None
     ) -> List[MatchResult]:
         """
         Find matches for a patient among a list of candidates
@@ -970,7 +972,7 @@ class PatientMatcher:
             patient: Patient to match
             candidates: List of candidate patients
             min_score: Minimum score to include in results
-            compute_embeddings: Whether to compute embeddings
+            compute_embeddings: Whether to compute embeddings (None = use self.use_embeddings)
         
         Returns:
             List of MatchResults sorted by score descending

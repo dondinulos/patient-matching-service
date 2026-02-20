@@ -252,8 +252,8 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           value: containerRegistry.listCredentials().passwords[0].value
         }
         {
-          name: 'cosmos-connection-string'
-          value: cosmosDbAccount.listConnectionStrings().connectionStrings[0].connectionString
+          name: 'cosmos-key'
+          value: cosmosDbAccount.listKeys().primaryMasterKey
         }
         {
           name: 'openai-api-key'
@@ -276,20 +276,24 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
               value: environment
             }
             {
-              name: 'COSMOS_ENDPOINT'
-              value: cosmosDbAccount.properties.documentEndpoint
+              name: 'PM_DB_TYPE'
+              value: 'cosmos'
+            }
+            {
+              name: 'COSMOS_GREMLIN_ENDPOINT'
+              value: '${cosmosDbAccount.name}.gremlin.cosmos.azure.com'
             }
             {
               name: 'COSMOS_DATABASE'
               value: gremlinDatabase.name
             }
             {
-              name: 'COSMOS_GRAPH'
+              name: 'COSMOS_CONTAINER'
               value: gremlinGraphPatients.name
             }
             {
-              name: 'COSMOS_CONNECTION_STRING'
-              secretRef: 'cosmos-connection-string'
+              name: 'COSMOS_KEY'
+              secretRef: 'cosmos-key'
             }
             {
               name: 'AZURE_OPENAI_ENDPOINT'
@@ -357,11 +361,174 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
 }
 
 // ============================================================================
+// Container App - Patient Matching Dashboard (Streamlit)
+// ============================================================================
+resource containerAppDashboard 'Microsoft.App/containerApps@2023-05-01' = {
+  name: 'ca-${resourcePrefix}-dashboard'
+  location: location
+  identity: {
+    type: 'SystemAssigned'
+  }
+  properties: {
+    managedEnvironmentId: containerAppsEnvironment.id
+    configuration: {
+      activeRevisionsMode: 'Single'
+      ingress: {
+        external: true
+        targetPort: 8503
+        transport: 'http'
+        allowInsecure: false
+      }
+      registries: [
+        {
+          server: containerRegistry.properties.loginServer
+          username: containerRegistry.listCredentials().username
+          passwordSecretRef: 'acr-password'
+        }
+      ]
+      secrets: [
+        {
+          name: 'acr-password'
+          value: containerRegistry.listCredentials().passwords[0].value
+        }
+        {
+          name: 'cosmos-key'
+          value: cosmosDbAccount.listKeys().primaryMasterKey
+        }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: 'patient-matching-dashboard'
+          image: '${containerRegistry.properties.loginServer}/patient-matching-dashboard:${imageTag}'
+          resources: {
+            cpu: json('0.5')
+            memory: '1Gi'
+          }
+          env: [
+            {
+              name: 'ENVIRONMENT'
+              value: environment
+            }
+            {
+              name: 'PM_DB_TYPE'
+              value: 'cosmos'
+            }
+            {
+              name: 'COSMOS_ACCOUNT_NAME'
+              value: cosmosDbAccount.name
+            }
+            {
+              name: 'COSMOS_GREMLIN_ENDPOINT'
+              value: '${cosmosDbAccount.name}.gremlin.cosmos.azure.com'
+            }
+            {
+              name: 'COSMOS_DATABASE'
+              value: gremlinDatabase.name
+            }
+            {
+              name: 'COSMOS_CONTAINER'
+              value: gremlinGraphPatients.name
+            }
+            {
+              name: 'COSMOS_KEY'
+              secretRef: 'cosmos-key'
+            }
+            {
+              name: 'AZURE_OPENAI_ENDPOINT'
+              value: openAiAccount.properties.endpoint
+            }
+            {
+              name: 'AZURE_OPENAI_EMBEDDING_DEPLOYMENT'
+              value: 'text-embedding-ada-002'
+            }
+            {
+              name: 'AZURE_OPENAI_CHAT_DEPLOYMENT'
+              value: 'gpt-4o'
+            }
+            {
+              name: 'AZURE_AI_FOUNDRY_PROJECT_ENDPOINT'
+              value: '${openAiAccount.properties.endpoint}api/projects/${openAiAccount.name}-project'
+            }
+            {
+              name: 'AZURE_OPENAI_DEPLOYMENT'
+              value: 'gpt-4o'
+            }
+          ]
+          probes: [
+            {
+              type: 'Liveness'
+              httpGet: {
+                path: '/_stcore/health'
+                port: 8503
+              }
+              initialDelaySeconds: 15
+              periodSeconds: 30
+            }
+            {
+              type: 'Readiness'
+              httpGet: {
+                path: '/_stcore/health'
+                port: 8503
+              }
+              initialDelaySeconds: 10
+              periodSeconds: 10
+            }
+          ]
+        }
+      ]
+      scale: {
+        minReplicas: 1
+        maxReplicas: 3
+        rules: [
+          {
+            name: 'http-rule'
+            http: {
+              metadata: {
+                concurrentRequests: '50'
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+  tags: {
+    environment: environment
+    application: 'patient-matching'
+  }
+}
+
+// Grant dashboard managed identity Cognitive Services User role on AI account (for Foundry Agent Service)
+resource openAiRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(openAiAccount.id, containerAppDashboard.id, 'cognitive-services-user')
+  scope: openAiAccount
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'a97b65f3-24c7-4388-baec-2e87135dc908') // Cognitive Services User
+    principalId: containerAppDashboard.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Grant dashboard managed identity access to Cosmos DB
+resource cosmosRoleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2023-11-15' = {
+  parent: cosmosDbAccount
+  name: guid(cosmosDbAccount.id, containerAppDashboard.id, 'cosmos-data-reader')
+  properties: {
+    roleDefinitionId: '${cosmosDbAccount.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000001' // Built-in Cosmos DB Data Reader
+    principalId: containerAppDashboard.identity.principalId
+    scope: cosmosDbAccount.id
+  }
+}
+
+// ============================================================================
 // Outputs
 // ============================================================================
 output containerRegistryLoginServer string = containerRegistry.properties.loginServer
 output containerRegistryName string = containerRegistry.name
 output containerAppUrl string = 'https://${containerApp.properties.configuration.ingress.fqdn}'
+output dashboardUrl string = 'https://${containerAppDashboard.properties.configuration.ingress.fqdn}'
 output cosmosDbEndpoint string = cosmosDbAccount.properties.documentEndpoint
 output cosmosDbAccountName string = cosmosDbAccount.name
 output openAiEndpoint string = openAiAccount.properties.endpoint

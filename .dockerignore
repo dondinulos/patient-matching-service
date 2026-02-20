@@ -64,5 +64,15 @@ Thumbs.db
 *.log
 *.tmp
 
-# Large data files (optional - keep sample data)
-# data/fhir/*.json
+# Large data files (exclude FHIR test data from build context)
+data/fhir/
+data/test/
+data/
+output.txt
+body.json
+*.json
+!app/**/*.json
+!src/**/*.json
+tests/
+scripts/
+.github/

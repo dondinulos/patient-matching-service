@@ -664,16 +664,17 @@ class CosmosGraphDB:
         
         return list(candidates.items())
     
-    def find_candidates_by_contact(self, patient_id: str) -> List[Tuple[str, List[str]]]:
+    def find_candidates_by_contact(self, patient_id_or_patient, limit: int = 100) -> List[Tuple[str, List[str]]]:
         """
         Find candidate matches by shared contact points (phone, email).
         
         Args:
-            patient_id: Source patient ID
+            patient_id_or_patient: Source patient ID (str) or Patient object
             
         Returns:
             List of (candidate_id, shared_contact_values) tuples
         """
+        patient_id = patient_id_or_patient.id if hasattr(patient_id_or_patient, 'id') else patient_id_or_patient
         query = """
         g.V().has('Patient', 'id', patientId).as('p1')
             .out('HAS_CONTACT').as('contact')
@@ -700,19 +701,20 @@ class CosmosGraphDB:
     
     def find_candidates_by_demographics(
         self,
-        patient_id: str,
+        patient_id_or_patient,
         limit: int = 50
     ) -> List[str]:
         """
         Find candidates with same DOB and last name first letter (blocking).
         
         Args:
-            patient_id: Source patient ID
+            patient_id_or_patient: Source patient ID (str) or Patient object
             limit: Maximum candidates
             
         Returns:
             List of candidate patient IDs
         """
+        patient_id = patient_id_or_patient.id if hasattr(patient_id_or_patient, 'id') else patient_id_or_patient
         # Get patient's DOB and last name
         query = "g.V().has('Patient', 'id', patientId).valueMap('birthDate', 'lastName')"
         results = self._execute_query(query, {"patientId": patient_id})
@@ -744,6 +746,14 @@ class CosmosGraphDB:
         
         return candidates
     
+    # ---- Interface adapters (accept Patient objects like PatientGraphDB) ----
+
+    def find_candidates_by_identifiers(
+        self, patient: "Patient", limit: int = 100
+    ) -> List[Tuple[str, List[str]]]:
+        """Adapter: accepts a Patient object, delegates to find_candidates_by_identifier."""
+        return self.find_candidates_by_identifier(patient.id)
+
     # ==================== Potential Match Operations ====================
     
     def create_potential_match(

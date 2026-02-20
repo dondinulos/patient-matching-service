@@ -19,6 +19,9 @@ openai>=1.0.0
 # Install with: pip install agent-framework-azure-ai --pre
 agent-framework-azure-ai
 
+# MCP Server (Model Context Protocol)
+mcp[cli]>=1.0.0
+
 # Utilities
 python-dotenv>=1.0.0
 
