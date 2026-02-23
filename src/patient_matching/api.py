@@ -157,18 +157,36 @@ async def startup_event():
     """Initialize service on startup"""
     global _service
     
-    neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-    neo4j_user = os.getenv("NEO4J_USER", "neo4j")
-    neo4j_password = os.getenv("NEO4J_PASSWORD", "password")
-    use_embeddings = os.getenv("USE_EMBEDDINGS", "false").lower() == "true"
-    openai_api_key = os.getenv("OPENAI_API_KEY")
+    db_type = os.getenv("PM_DB_TYPE", "cosmos")
+    azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    azure_key = os.getenv("AZURE_OPENAI_API_KEY")
+    use_azure = bool(azure_endpoint)
+    use_embeddings = os.getenv("USE_EMBEDDINGS", str(use_azure)).lower() == "true"
+    use_llm = os.getenv("USE_LLM", str(use_azure)).lower() == "true"
     
     _service = PatientMatchingService(
-        neo4j_uri=neo4j_uri,
-        neo4j_user=neo4j_user,
-        neo4j_password=neo4j_password,
+        # Neo4j configuration
+        neo4j_uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+        neo4j_user=os.getenv("NEO4J_USER", "neo4j"),
+        neo4j_password=os.getenv("NEO4J_PASSWORD", "password"),
+        # Cosmos DB configuration
+        cosmos_endpoint=os.getenv("COSMOS_GREMLIN_ENDPOINT"),
+        cosmos_database=os.getenv("COSMOS_DATABASE", "PatientMatching"),
+        cosmos_container=os.getenv("COSMOS_CONTAINER", "PatientGraph"),
+        cosmos_key=os.getenv("COSMOS_KEY"),
+        # Database selection
+        db_type=db_type,
+        # Matching configuration
         use_embeddings=use_embeddings,
-        openai_api_key=openai_api_key
+        use_llm=use_llm,
+        openai_api_key=os.getenv("OPENAI_API_KEY"),
+        # Azure OpenAI configuration
+        use_azure_openai=use_azure,
+        azure_openai_endpoint=azure_endpoint,
+        azure_openai_key=azure_key,
+        azure_openai_embedding_deployment=os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-ada-002"),
+        azure_openai_gpt_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o"),
+        azure_openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01")
     )
     
     try:
@@ -283,6 +301,56 @@ async def create_patient(
     patient.id = patient_id
     
     return _patient_to_response(patient)
+
+@app.get("/patients/search", tags=["Patients"])
+async def search_patients(
+    name: Optional[str] = Query(default=None, description="Patient name to search for (partial match)"),
+    birth_date: Optional[str] = Query(default=None, description="Patient birth date in YYYY-MM-DD format"),
+    identifier_value: Optional[str] = Query(default=None, description="Identifier value (MRN, SSN, etc.)"),
+    limit: int = Query(default=20, le=100, description="Maximum number of results"),
+    service: PatientMatchingService = Depends(get_service)
+):
+    """
+    Search for patients by name, birth date, or identifier.
+    
+    Returns a list of patients matching the search criteria.
+    At least one search parameter must be provided.
+    """
+    all_patients = service.db.get_all_patients(limit=500)
+    
+    results = []
+    for patient in all_patients:
+        match = True
+        
+        if name:
+            patient_name = patient.name.full_name.lower() if patient.name else ""
+            if name.lower() not in patient_name:
+                match = False
+        
+        if birth_date and match:
+            if patient.birth_date:
+                if patient.birth_date.isoformat() != birth_date:
+                    match = False
+            else:
+                match = False
+        
+        if identifier_value and match:
+            found_id = False
+            for identifier in patient.identifiers:
+                if identifier_value.lower() in identifier.value.lower():
+                    found_id = True
+                    break
+            if not found_id:
+                match = False
+        
+        if match:
+            results.append(_patient_to_response(patient))
+        
+        if len(results) >= limit:
+            break
+    
+    return {"patients_found": len(results), "patients": results}
+
 
 @app.get("/patients/{patient_id}", response_model=PatientResponse, tags=["Patients"])
 async def get_patient(

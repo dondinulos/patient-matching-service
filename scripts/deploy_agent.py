@@ -36,6 +36,7 @@ async def deploy():
     """Deploy the Patient Matching Agent to Foundry."""
     project_endpoint = os.getenv("AZURE_AI_FOUNDRY_PROJECT_ENDPOINT")
     deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+    api_base_url = os.getenv("PM_API_BASE_URL")
 
     if not project_endpoint:
         logger.error(
@@ -47,6 +48,7 @@ async def deploy():
     logger.info("Deploying Patient Matching Agent to Foundry Agent Service")
     logger.info("  Project endpoint: %s", project_endpoint)
     logger.info("  Model deployment: %s", deployment)
+    logger.info("  API base URL: %s", api_base_url or "(local function tools)")
 
     # create_foundry_agent returns an async context manager.
     # Entering the context registers the agent server-side if it doesn't exist.
@@ -54,6 +56,7 @@ async def deploy():
         project_endpoint=project_endpoint,
         deployment_name=deployment,
         agent_name="PatientMatchingAgent",
+        api_base_url=api_base_url,
     ) as agent:
         logger.info("Agent registered successfully!")
         logger.info("  Agent name: PatientMatchingAgent")

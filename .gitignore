@@ -65,3 +65,9 @@ Thumbs.db
 # Local data (keep structure but not files)
 data/test/*.json
 !data/fhir/.gitkeep
+build_api_log.txt
+build_dash_log.txt
+build_log.txt
+dash_logs.txt
+deploy_agent_log.txt
+search_test.txt

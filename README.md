@@ -227,35 +227,55 @@ With LLM enabled:
 Final Score = (Traditional Score × 0.8) + (LLM Score × 0.2)
 ```
 
-## 🤖 AI Agent (Microsoft Agent Framework)
+## 🤖 AI Agent (Microsoft Agent Framework) — Deployed
 
-The Patient Matching Service can be deployed as an **AI Agent** using the Microsoft Agent Framework, available both as a standalone CLI and embedded in the Streamlit dashboard.
+The Patient Matching Agent is **deployed and running** on Azure AI Foundry Agent Service. It is accessible through the Streamlit dashboard's Agent Chat tab and via the CLI. The agent uses **OpenAPI tools** that call the Container App REST API server-side, so all operations work end-to-end from the browser without a local Python runtime.
+
+### Architecture
+
+```
+┌──────────────────────┐     ┌──────────────────────────┐     ┌─────────────────────┐
+│  Streamlit Dashboard │────▶│  Azure AI Foundry         │────▶│  Container App API  │
+│  (Agent Chat tab)    │     │  Agent Service (gpt-4o)   │     │  (FastAPI + Cosmos)  │
+│                      │     │                          │     │                     │
+│  CLI / Python client │────▶│  PatientMatchingAgent     │     │  /patients/search   │
+└──────────────────────┘     │  (OpenAPI tools)          │     │  /match/all         │
+                             └──────────────────────────┘     │  /stats, /reviews   │
+                                                              └─────────────────────┘
+```
+
+The agent is registered in Foundry with OpenAPI tool definitions pointing to the Container App API. When the agent decides to call a tool (e.g., search patients), Foundry makes an HTTP request directly to the API — no local function execution required.
 
 ### Features
 
 - **Conversational Interface**: Ask questions naturally about patient matching
 - **Dashboard Integration**: Agent Chat tab in the Streamlit dashboard for browser-based use
 - **Azure AI Foundry Deployment**: Server-side agent hosted in Azure AI Foundry Agent Service
+- **OpenAPI Tools**: Tools execute via the Container App REST API (server-side, no local runtime)
+- **Rate Limit Retry**: Built-in middleware with exponential backoff for Azure OpenAI 429 errors
+- **Auto-Reconnect**: Gremlin WebSocket connections automatically reconnect on transport failures
 - **Multi-Patient Matching**: Find matches against all patients in the database
 - **Match Decisions**: Approve or reject matches through conversation
-- **Service Statistics**: Get real-time stats about the MPI
 
-### Setup
+### Deployed Configuration
 
-```bash
-# Install the Microsoft Agent Framework (preview)
-pip install agent-framework-azure-ai --pre
-```
+| Setting | Value |
+|---------|-------|
+| **Agent Name** | `PatientMatchingAgent` |
+| **Model** | `gpt-4o` |
+| **Foundry Project** | `oai-patientmatch-dev-o2zma5gvtrukg-project` |
+| **API Backend** | `ca-patientmatch-dev-api` Container App |
+| **Tool Type** | OpenAPI (server-side HTTP calls) |
 
 ### Environment Variables
 
 ```bash
-# Azure OpenAI Configuration
-export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com/"
-export AZURE_OPENAI_DEPLOYMENT="gpt-4o"
-
 # Azure AI Foundry (for Foundry Agent Service)
 export AZURE_AI_FOUNDRY_PROJECT_ENDPOINT="https://your-resource.services.ai.azure.com/api/projects/your-project"
+export AZURE_OPENAI_DEPLOYMENT="gpt-4o"
+
+# Container App API URL (enables OpenAPI tools for server-side execution)
+export PM_API_BASE_URL="https://your-api-container-app.azurecontainerapps.io"
 
 # Database Configuration (Cosmos DB or Neo4j)
 export PM_DB_TYPE="cosmos"  # or "neo4j"
@@ -269,23 +289,24 @@ export COSMOS_KEY="your-key"
 
 ```python
 import asyncio
-from patient_matching.agent import create_patient_matching_agent
+from patient_matching.agent import create_foundry_agent
 
 async def main():
-    # Create the agent (uses AzureOpenAIChatClient)
-    agent = create_patient_matching_agent()
-    
-    # Single query
-    result = await agent.run("Find all matches for patient P123")
-    print(result.text)
-    
-    # Compare two patients
-    result = await agent.run("Compare patient abc-123 with patient xyz-456")
-    print(result.text)
-    
-    # Get service statistics
-    result = await agent.run("What are the current service statistics?")
-    print(result.text)
+    # Create the agent with OpenAPI tools (calls Container App API)
+    async with create_foundry_agent(
+        api_base_url="https://your-api.azurecontainerapps.io"
+    ) as agent:
+        # Search for patients
+        result = await agent.run("Search patients named Aaron")
+        print(result.text)
+
+        # Compare two patients
+        result = await agent.run("Compare patient abc-123 with patient xyz-456")
+        print(result.text)
+
+        # Get service statistics
+        result = await agent.run("What are the current service statistics?")
+        print(result.text)
 
 asyncio.run(main())
 ```
@@ -300,27 +321,32 @@ python -m src.patient_matching.agent
 python -m src.patient_matching.agent --foundry
 
 # Example conversation:
-# You: Find all potential matches for patient 92d2064d-11a2-44cc-843a-9547a3748eb4
-# Agent: I found 5 potential matches for the patient:
-#        1. Patient 3357f00c-... - Score: 0.95 (AUTO_MERGE)
-#        2. Patient fc0159e8-... - Score: 0.95 (AUTO_MERGE)
+# You: Search patients named Aaron
+# Agent: Found 20 patients matching "Aaron":
+#        1. Aaron697 Brekke496 (DOB: 1945-12-10, Male)
+#        2. Aaron697 Stiedemann542 (DOB: 1946-03-29, Male)
 #        ...
-#        These matches have highly similar details, indicating they are likely duplicates.
 ```
 
-### Agent Tools
+### Deploying the Agent
 
-| Tool | Description |
-|------|-------------|
-| `find_patient_matches` | Find potential matches for a patient (optional: search entire database) |
-| `get_patient_details` | Get detailed patient information |
-| `compare_two_patients` | Compare two specific patients with detailed scoring |
-| `run_batch_matching` | Run matching for all patients in the database |
-| `approve_patient_match` | Approve and merge two patients |
-| `reject_patient_match` | Reject a potential match |
-| `get_pending_reviews` | Get matches requiring human review |
-| `get_service_statistics` | Get MPI statistics |
-| `search_patients` | Search patients by name, DOB, or identifier |
+```bash
+# Deploy or update the agent in Foundry with OpenAPI tools
+export PM_API_BASE_URL="https://your-api.azurecontainerapps.io"
+python scripts/deploy_agent.py
+```
+
+### Agent Tools (OpenAPI)
+
+| Tool (operationId) | HTTP Endpoint | Description |
+|---------------------|---------------|-------------|
+| `searchPatients` | `GET /patients/search` | Search patients by name, DOB, or identifier |
+| `getPatientDetails` | `GET /patients/{id}` | Get detailed patient information |
+| `findPatientMatches` | `POST /match/all` | Find potential duplicate matches for a patient |
+| `compareTwoPatients` | `POST /match/compare` | Compare two specific patients with detailed scoring |
+| `getPendingReviews` | `GET /reviews/pending` | Get matches requiring human review |
+| `submitReviewDecision` | `POST /reviews/decision` | Approve or reject a match |
+| `getServiceStatistics` | `GET /stats` | Get MPI statistics |
 
 ## � MCP Server (Model Context Protocol)
 
@@ -485,6 +511,7 @@ PatientMatching/
 │       ├── agent.py           # AI Agent (Microsoft Agent Framework)
 │       └── mcp_server.py     # MCP Server (Model Context Protocol)
 ├── scripts/
+│   ├── deploy_agent.py         # Deploy agent to Azure AI Foundry
 │   ├── load_fhir_to_cosmos.py # Load FHIR data to Cosmos DB
 │   └── run_matching.py        # Run batch matching
 ├── tests/
@@ -494,13 +521,15 @@ PatientMatching/
 ├── data/
 │   └── fhir/                  # Sample FHIR bundle files
 ├── deploy/
-│   ├── main.bicep             # Azure infrastructure as code
+│   ├── main.bicep             # Azure infrastructure as code (Cosmos DB, OpenAI, Container Apps)
 │   ├── deploy.ps1             # PowerShell deployment script
 │   └── deploy.sh              # Bash deployment script
+├── Dockerfile                 # API container image
+├── Dockerfile.dashboard       # Dashboard container image
+├── containerapp.yaml          # Container App configuration
 ├── docs/
 │   └── Patient Matching Service.txt
 ├── requirements.txt
-├── Dockerfile
 └── README.md
 ```
 
@@ -510,6 +539,7 @@ PatientMatching/
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/patients` | Create a new patient |
+| GET | `/patients/search` | Search patients by name, DOB, or identifier |
 | GET | `/patients/{id}` | Get patient by ID |
 | POST | `/patients/batch` | Batch load from FHIR directory |
 
@@ -517,7 +547,10 @@ PatientMatching/
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/match` | Find matches for a patient |
+| POST | `/match/all` | Find matches against ALL patients in the database |
 | POST | `/match/compare` | Compare two specific patients |
+| POST | `/match/global` | Run matching for all patients (background) |
+| POST | `/match/batch` | Batch matching for specific patients |
 | GET | `/match/graph/{patient_id}` | Get graph-based matches |
 
 ### EMPI Records
@@ -532,6 +565,13 @@ PatientMatching/
 |--------|----------|-------------|
 | GET | `/reviews/pending` | Get pending reviews |
 | POST | `/reviews/decision` | Submit review decision |
+
+### Statistics & Config
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/stats` | Get service statistics |
+| GET | `/config/weights` | Get current match weights |
+| PUT | `/config/weights` | Update match weights |
 
 ## 🧠 AI-Enhanced Matching
 
@@ -561,17 +601,19 @@ Provides intelligent match reasoning:
 
 ## ☁️ Azure Deployment
 
-### Resources Deployed
+### Deployed Resources
 
-| Resource | Description |
-|----------|-------------|
-| **Azure Cosmos DB** | Gremlin + NoSQL APIs for graph and document storage |
-| **Azure OpenAI / AI Foundry** | GPT-4o, text-embedding-ada-002, and Foundry Agent Service |
-| **Azure Container Apps** | Hosts the Patient Matching API and Dashboard |
-| **Azure Container Registry** | Docker image storage |
-| **Log Analytics** | Monitoring and diagnostics |
+| Resource | Name | Description |
+|----------|------|-------------|
+| **Azure Cosmos DB** | `cosmos-patientmatch-dev-*` | Gremlin API (`patient-matching-db` database, `patients` + `match_results` graphs) |
+| **Azure OpenAI / AI Foundry** | `oai-patientmatch-dev-*` | GPT-4o, text-embedding-ada-002, and Foundry Agent Service |
+| **Container App (API)** | `ca-patientmatch-dev-api` | FastAPI REST API with patient search, matching, and review endpoints |
+| **Container App (Dashboard)** | `ca-patientmatch-dev-dashboard` | Streamlit dashboard with Agent Chat, Patient Graph, and Review Queue |
+| **Azure Container Registry** | `acrpatientmatch*` | Docker images for API and Dashboard |
+| **Log Analytics** | — | Monitoring and diagnostics |
+| **Resource Group** | `rg-patient-matching` | All resources in West US |
 
-### Deploy to Azure
+### Deploy Infrastructure
 
 ```powershell
 # Windows
@@ -580,6 +622,31 @@ cd deploy
 
 # Linux/macOS
 ./deploy.sh -e dev
+```
+
+### Deploy Agent to Foundry
+
+```bash
+# Set environment variables
+export AZURE_AI_FOUNDRY_PROJECT_ENDPOINT="https://..."
+export PM_API_BASE_URL="https://ca-patientmatch-dev-api....azurecontainerapps.io"
+
+# Register/update the agent with OpenAPI tools
+python scripts/deploy_agent.py
+```
+
+### Rebuild & Deploy Container Apps
+
+```bash
+# Build API image
+az acr build --registry <acr-name> -g rg-patient-matching --image patient-matching:latest -f Dockerfile .
+
+# Build Dashboard image
+az acr build --registry <acr-name> -g rg-patient-matching --image patient-matching-dashboard:latest -f Dockerfile.dashboard .
+
+# Force new revision (Container Apps pull :latest on revision create)
+az containerapp update --name ca-patientmatch-dev-api -g rg-patient-matching --set-env-vars "REBUILD_STAMP=$(date +%s)"
+az containerapp update --name ca-patientmatch-dev-dashboard -g rg-patient-matching --set-env-vars "REBUILD_STAMP=$(date +%s)"
 ```
 
 ## 🧪 Testing

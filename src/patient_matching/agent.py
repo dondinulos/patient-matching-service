@@ -22,6 +22,7 @@ Usage:
 
 import os
 import logging
+import asyncio
 from typing import Annotated, Optional, List, Dict, Any
 from datetime import date, datetime
 import json
@@ -495,6 +496,51 @@ def get_patient_matching_tools() -> list:
     ]
 
 
+class RateLimitRetryMiddleware:
+    """Chat middleware that retries on 429 (Too Many Requests) errors with exponential backoff."""
+
+    def __init__(self, max_retries: int = 5, base_delay: float = 2.0, max_delay: float = 60.0):
+        self.max_retries = max_retries
+        self.base_delay = base_delay
+        self.max_delay = max_delay
+
+    async def process(self, context, call_next):
+        last_error = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                await call_next()
+                return  # Success
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str or "too_many_requests" in error_str or "Too Many Requests" in error_str:
+                    last_error = e
+                    if attempt < self.max_retries:
+                        delay = min(self.base_delay * (2 ** attempt), self.max_delay)
+                        logger.warning(
+                            f"Rate limited (429). Retrying in {delay:.1f}s "
+                            f"(attempt {attempt + 1}/{self.max_retries})..."
+                        )
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.error(f"Rate limited (429). All {self.max_retries} retries exhausted.")
+                        raise
+                else:
+                    raise  # Non-rate-limit error, don't retry
+
+    # Mark as chat middleware so the framework routes it correctly
+    _middleware_type = None  # Will be set below
+
+# Set the middleware type marker after imports are available
+def _mark_middleware():
+    try:
+        from agent_framework._middleware import MiddlewareType
+        RateLimitRetryMiddleware._middleware_type = MiddlewareType.CHAT
+    except (ImportError, AttributeError):
+        pass  # Framework version may not need this marker
+
+_mark_middleware()
+
+
 AGENT_INSTRUCTIONS = """You are a Patient Matching Assistant that helps healthcare administrators 
 manage patient identity matching and Master Patient Index (MPI) operations.
 
@@ -577,7 +623,8 @@ def create_patient_matching_agent(
     chat_client = AzureOpenAIChatClient(
         endpoint=aoai_endpoint,
         deployment_name=deployment,
-        credential=credential
+        credential=credential,
+        middleware=[RateLimitRetryMiddleware()]
     )
     
     # Create agent using as_agent() pattern
@@ -588,36 +635,173 @@ def create_patient_matching_agent(
     )
 
 
+def _build_openapi_tools(api_base_url: str) -> list:
+    """Build OpenAPI tool definitions for the Foundry Agent Service.
+    
+    These tools point to the Container App REST API so the Foundry service
+    can execute them server-side without a local Python client.
+    """
+    from azure.ai.projects.models import (
+        OpenApiAgentTool,
+        OpenApiFunctionDefinition,
+        OpenApiAnonymousAuthDetails,
+    )
+
+    # Strip trailing slash
+    base = api_base_url.rstrip("/")
+
+    # Build an OpenAPI spec covering the patient matching API endpoints
+    openapi_spec = {
+        "openapi": "3.0.0",
+        "info": {
+            "title": "Patient Matching Service",
+            "version": "1.0.0",
+            "description": "MPI with deterministic, probabilistic, and AI-enhanced matching"
+        },
+        "servers": [{"url": base}],
+        "paths": {
+            "/patients/search": {
+                "get": {
+                    "operationId": "searchPatients",
+                    "summary": "Search for patients by name, birth date, or identifier",
+                    "parameters": [
+                        {"name": "name", "in": "query", "schema": {"type": "string"}, "description": "Patient name to search for (partial match)"},
+                        {"name": "birth_date", "in": "query", "schema": {"type": "string"}, "description": "Birth date in YYYY-MM-DD format"},
+                        {"name": "identifier_value", "in": "query", "schema": {"type": "string"}, "description": "Identifier value (MRN, SSN, etc.)"},
+                        {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}, "description": "Max results"}
+                    ],
+                    "responses": {"200": {"description": "Search results", "content": {"application/json": {"schema": {"type": "object"}}}}}
+                }
+            },
+            "/patients/{patient_id}": {
+                "get": {
+                    "operationId": "getPatientDetails",
+                    "summary": "Get detailed information about a specific patient",
+                    "parameters": [
+                        {"name": "patient_id", "in": "path", "required": True, "schema": {"type": "string"}, "description": "The patient ID"}
+                    ],
+                    "responses": {"200": {"description": "Patient details", "content": {"application/json": {"schema": {"type": "object"}}}}}
+                }
+            },
+            "/match/all": {
+                "post": {
+                    "operationId": "findPatientMatches",
+                    "summary": "Find potential duplicate matches for a patient against all records",
+                    "parameters": [
+                        {"name": "patient_id", "in": "query", "required": True, "schema": {"type": "string"}, "description": "Patient ID to find matches for"},
+                        {"name": "min_score", "in": "query", "schema": {"type": "number", "default": 0.3}, "description": "Minimum match score (0.0-1.0)"},
+                        {"name": "max_results", "in": "query", "schema": {"type": "integer", "default": 20}, "description": "Maximum matches to return"}
+                    ],
+                    "responses": {"200": {"description": "Match results", "content": {"application/json": {"schema": {"type": "array"}}}}}
+                }
+            },
+            "/match/compare": {
+                "post": {
+                    "operationId": "compareTwoPatients",
+                    "summary": "Compare two specific patients for a detailed match score",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["patient1_id", "patient2_id"],
+                                    "properties": {
+                                        "patient1_id": {"type": "string", "description": "First patient ID"},
+                                        "patient2_id": {"type": "string", "description": "Second patient ID"}
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "responses": {"200": {"description": "Comparison result", "content": {"application/json": {"schema": {"type": "object"}}}}}
+                }
+            },
+            "/reviews/pending": {
+                "get": {
+                    "operationId": "getPendingReviews",
+                    "summary": "Get patient matches requiring human review",
+                    "parameters": [
+                        {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}, "description": "Max reviews to return"}
+                    ],
+                    "responses": {"200": {"description": "Pending reviews", "content": {"application/json": {"schema": {"type": "object"}}}}}
+                }
+            },
+            "/reviews/decision": {
+                "post": {
+                    "operationId": "submitReviewDecision",
+                    "summary": "Approve or reject a patient match",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["patient1_id", "patient2_id", "decision", "reviewed_by"],
+                                    "properties": {
+                                        "patient1_id": {"type": "string"},
+                                        "patient2_id": {"type": "string"},
+                                        "decision": {"type": "string", "enum": ["approve", "reject"]},
+                                        "reviewed_by": {"type": "string"},
+                                        "reason": {"type": "string"}
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "responses": {"200": {"description": "Decision result", "content": {"application/json": {"schema": {"type": "object"}}}}}
+                }
+            },
+            "/stats": {
+                "get": {
+                    "operationId": "getServiceStatistics",
+                    "summary": "Get patient matching service statistics",
+                    "responses": {"200": {"description": "Service statistics", "content": {"application/json": {"schema": {"type": "object"}}}}}
+                }
+            }
+        }
+    }
+
+    tool = OpenApiAgentTool(
+        openapi=OpenApiFunctionDefinition(
+            name="patient_matching_api",
+            description="Patient Matching Service API for searching patients, finding duplicates, comparing records, and managing match reviews",
+            spec=openapi_spec,
+            auth=OpenApiAnonymousAuthDetails(),
+        )
+    )
+
+    return [tool]
+
+
 def create_foundry_agent(
     project_endpoint: str = None,
     deployment_name: str = None,
-    agent_name: str = "PatientMatchingAgent"
+    agent_name: str = "PatientMatchingAgent",
+    api_base_url: str = None
 ):
     """
     Create a Patient Matching Agent deployed to Azure AI Foundry Agent Service.
     
-    The agent is registered server-side in the Foundry project and can be
-    accessed via the Foundry API, Foundry portal, or any Agent Framework client.
+    When api_base_url is provided, uses OpenAPI tools that call the Container App
+    API server-side (required for Foundry playground). Otherwise falls back to
+    local Python function tools (for CLI usage).
     
     Args:
         project_endpoint: Foundry project endpoint (or AZURE_AI_FOUNDRY_PROJECT_ENDPOINT env var)
-            Format: https://<resource>.services.ai.azure.com/api/projects/<project-name>
         deployment_name: Model deployment name (or AZURE_OPENAI_DEPLOYMENT env var)
-        agent_name: Name for the agent (alphanumeric and hyphens only, max 63 chars)
+        agent_name: Name for the agent
+        api_base_url: Base URL for the Container App API (or PM_API_BASE_URL env var)
     
     Returns:
         Async context manager yielding a configured Foundry ChatAgent
-    
-    Usage:
-        async with create_foundry_agent() as agent:
-            result = await agent.run("Find matches for patient P123")
-            print(result.text)
     """
     from agent_framework.azure import AzureAIClient
     from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
 
     project_ep = project_endpoint or os.getenv("AZURE_AI_FOUNDRY_PROJECT_ENDPOINT")
     deployment = deployment_name or os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+    base_url = api_base_url or os.getenv("PM_API_BASE_URL")
 
     if not project_ep:
         raise ValueError(
@@ -632,12 +816,22 @@ def create_foundry_agent(
         project_endpoint=project_ep,
         model_deployment_name=deployment,
         credential=credential,
+        middleware=[RateLimitRetryMiddleware()],
     )
+
+    # Use OpenAPI tools (server-side execution) when API URL is available,
+    # otherwise fall back to local Python function tools
+    if base_url:
+        tools = _build_openapi_tools(base_url)
+        logger.info(f"Using OpenAPI tools pointing to {base_url}")
+    else:
+        tools = get_patient_matching_tools()
+        logger.info("Using local Python function tools")
 
     return client.as_agent(
         name=agent_name,
         instructions=AGENT_INSTRUCTIONS,
-        tools=get_patient_matching_tools(),
+        tools=tools,
     )
 
 

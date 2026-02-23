@@ -1622,9 +1622,11 @@ def render_patient_graph(nosql_client, gremlin_client, account_name):
 
 def _run_agent_query(query: str, project_endpoint: str, deployment: str) -> str:
     async def _invoke():
+        api_base_url = os.environ.get("PM_API_BASE_URL")
         async with create_foundry_agent(
             project_endpoint=project_endpoint,
             deployment_name=deployment,
+            api_base_url=api_base_url,
         ) as agent:
             result = await agent.run(query)
             return result.text

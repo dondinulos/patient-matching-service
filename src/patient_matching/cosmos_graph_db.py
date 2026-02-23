@@ -211,6 +211,33 @@ class CosmosGraphDB:
                 else:
                     logger.error(f"Gremlin query error: {e}")
                     raise
+            except Exception as e:
+                # Handle transport/connection errors (e.g. "Cannot write to closing transport",
+                # connection reset, WebSocket closed) by reconnecting and retrying
+                error_message = str(e)
+                is_transport_error = any(phrase in error_message for phrase in [
+                    "closing transport", "Connection refused", "connection was forcibly closed",
+                    "ConnectionResetError", "WebSocket", "Cannot connect to host",
+                    "ServerDisconnectedError", "ClientConnectorError",
+                ])
+                if is_transport_error:
+                    retry_count += 1
+                    if retry_count > max_retries:
+                        logger.error(f"Max retries ({max_retries}) exceeded for connection errors")
+                        raise
+                    delay = base_delay * (2 ** (retry_count - 1))
+                    logger.warning(
+                        f"Connection lost: {error_message[:80]}. "
+                        f"Reconnecting in {delay:.1f}s (attempt {retry_count}/{max_retries})..."
+                    )
+                    time.sleep(delay)
+                    try:
+                        self.connect()
+                    except Exception as reconnect_err:
+                        logger.error(f"Reconnect failed: {reconnect_err}")
+                        raise e  # Raise original error if reconnect fails
+                else:
+                    raise
     
     def initialize_schema(self) -> None:
         """
